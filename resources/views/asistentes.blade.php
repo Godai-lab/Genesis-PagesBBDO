@@ -45,7 +45,7 @@
                             <x-button-genesis class="mt-4" href="{{route('asistenteInnovacion.index')}}" >Iniciar</x-button-genesis>
                         </div>
                     </div> --}}
-                    @can('haveaccess','asistentesocialmedia.index')
+                    @can('haveaccess','asistentegrafica.index')
                     <div class="basis-1/3 flex flex-row gap-6">
                         <div class="text-base mt-1.5">
                             3.0
