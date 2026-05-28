@@ -490,22 +490,25 @@ public static function generateVideoFromVideo(
             ];
         }
 
-        // Validar duración
-        if (!in_array($duration, [5, 10])) {
+        // NOTA: La API de Runway gen4_aleph siempre genera 4 segundos, no acepta parámetro de duración
+        // Se mantiene el parámetro duration en el payload por compatibilidad, pero Runway lo ignora
+        // Validar duración (aunque Runway lo ignora, mantenemos la validación por compatibilidad)
+        if (!in_array($duration, [4, 5, 10])) {
             return [
                 'success' => false,
-                'error' => 'La duración debe ser 5 o 10 segundos.'
+                'error' => 'La duración debe ser 4, 5 o 10 segundos (Runway siempre genera 4 segundos).'
             ];
         }
 
         // Construir el payload
+        // NOTA: duration se envía pero Runway lo ignora, siempre genera 4 segundos
         $payload = [
             "videoUri" => $videoUri,
             "promptText" => $promptText,
             "seed" => $seed,
             "model" => $model,
             "ratio" => $ratio,
-            "duration" => $duration,
+            "duration" => $duration, // Runway ignora este parámetro, siempre genera 4 segundos
             "contentModeration" => $contentModeration
         ];
 

@@ -179,8 +179,8 @@
                         </div>
                     </div>
 
-                    <!-- Cantidad: solo OpenAI aplica count en la API de edición -->
-                    @if($this->showOutputCountSelector)
+                    <!-- Cantidad dropdown - Solo para modelos que soportan múltiples imágenes -->
+                    @if($this->supportsMultipleImages)
                     <div x-data="{ open: false }" class="relative">
                         <button 
                             @click="open = !open"
@@ -213,8 +213,8 @@
                     </div>
                     @endif
 
-                    <!-- Calidad dropdown - Solo para modelos OpenAI -->
-                    @if($model === 'gpt-image-1')
+                    <!-- Calidad dropdown - Solo para modelos OpenAI (gpt-image-1, gpt-image-1.5, etc.) -->
+                    @if(in_array($model, ['gpt-image-1', 'gpt-image-1.5']))
                     <div x-data="{ open: false }" class="relative">
                         <button 
                             @click="open = !open"
@@ -243,6 +243,41 @@
                                         @if($value === 'auto')
                                             <span class="text-xs text-gray-500">Por defecto</span>
                                         @endif
+                                    </button>
+                                @endforeach
+                            </div>
+                        </div>
+                    </div>
+                    @endif
+
+                    <!-- Resolución dropdown - Nano Banana Pro y Nano Banana 2 (Gemini 3) -->
+                    @if(in_array($model, ['gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview']))
+                    <div x-data="{ open: false }" class="relative">
+                        <button 
+                            @click="open = !open"
+                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                            </svg>
+                            <span>{{ $resolutionNanoBanana }}</span>
+                        </button>
+                        <div 
+                            x-show="open" 
+                            x-cloak
+                            @click.away="open = false"
+                            class="absolute bottom-full left-0 mb-1 bg-white border border-gray-200 rounded-xl p-4 w-[200px] z-20 shadow-lg"
+                        >
+                            <div class="text-center mb-2 text-gray-600 font-medium">Resolución</div>
+                            <div class="grid grid-cols-1 gap-2">
+                                @foreach(['1K' => '1K', '2K' => '2K', '4K' => '4K'] as $value => $label)
+                                    <button 
+                                        wire:click="$set('resolutionNanoBanana', '{{ $value }}')"
+                                        @click="open = false"
+                                        class="bg-{{ $resolutionNanoBanana === $value ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                    >
+                                        <span>{{ $value }}</span>
+                                        <span class="text-xs text-gray-500">{{ $label }}</span>
                                     </button>
                                 @endforeach
                             </div>
@@ -331,21 +366,57 @@
         console.log('🔄 Ejecutando edición con datos:', data);
     });
 
-    /* ---------- Flux polling ---------- */
+    /* ========== TRACKING DE IDs COMPLETADOS ========== */
+    const completedEdits = new Set();
+
+    /* ========== FLUX POLLING (usa FluxService - NO es Replicate) ========== */
     function startFluxPolling(data) {
-        console.log('⏰ Iniciando polling Flux edición:', data.generationId);
+        console.log('⏰ [Flux Edit] Iniciando polling:', data.generationId);
         setTimeout(function() { checkFluxStatus(data); }, 10_000);
     }
 
     function checkFluxStatus(data) {
-        console.log('🔍 Verificando Flux edición:', data.generationId);
+        if (completedEdits.has(data.generationId)) {
+            console.log('⏭️ [Flux Edit] Ya completado, ignorando:', data.generationId);
+            return;
+        }
+        console.log('🔍 [Flux Edit] Verificando:', data.generationId);
         Livewire.dispatch('verificarEstadoFluxKontext', data);
     }
 
     Livewire.on('fluxTaskStarted', function(e) { startFluxPolling(e); });
     Livewire.on('fluxStillPending', function(e) {
-        console.log('⏳ Flux edición aún pendiente');
+        console.log('⏳ [Flux Edit] Aún pendiente');
         setTimeout(function() { checkFluxStatus(e); }, 10_000);
+    });
+    Livewire.on('fluxEditCompleted', function(e) {
+        completedEdits.add(e.generationId);
+        console.log('✅ [Flux Edit] Completado:', e.generationId);
+    });
+
+    /* ========== REPLICATE POLLING (Seedream, etc.) ========== */
+    function startReplicatePolling(data) {
+        console.log('⏰ [Replicate Edit] Iniciando polling:', data.generationId, '| Tipo:', data.replicateType);
+        setTimeout(function() { checkReplicateStatus(data); }, 10_000);
+    }
+
+    function checkReplicateStatus(data) {
+        if (completedEdits.has(data.generationId)) {
+            console.log('⏭️ [Replicate Edit] Ya completado, ignorando:', data.generationId);
+            return;
+        }
+        console.log('🔍 [Replicate Edit] Verificando:', data.generationId, '| Tipo:', data.replicateType);
+        Livewire.dispatch('verificarEstadoReplicateEdit', data);
+    }
+
+    Livewire.on('replicateEditTaskStarted', function(e) { startReplicatePolling(e); });
+    Livewire.on('replicateEditStillPending', function(e) {
+        console.log('⏳ [Replicate Edit] Aún pendiente:', e.replicateType);
+        setTimeout(function() { checkReplicateStatus(e); }, 10_000);
+    });
+    Livewire.on('replicateEditCompleted', function(e) {
+        completedEdits.add(e.generationId);
+        console.log('✅ [Replicate Edit] Completado:', e.generationId, '| Tipo:', e.replicateType);
     });
 
     /* ---------- utilidades ---------- */

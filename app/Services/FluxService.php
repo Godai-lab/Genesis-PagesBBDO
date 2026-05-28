@@ -535,4 +535,147 @@ class FluxService
             }
         }
     }
+
+    /**
+     * FLUX.2 [PRO] - Genera o edita imágenes
+     */
+    public static function GenerateOrEditImageFlux2Pro(
+        string $prompt,
+        int $width = 1024,
+        int $height = 576,
+        ?string $inputImage = null,
+        array $additionalImages = [],
+        ?int $seed = null,
+        string $outputFormat = "png",
+        int $safetyTolerance = 2,
+        ?string $webhookUrl = null,
+        ?string $webhookSecret = null
+    ) {
+        try {
+            $url = "https://api.bfl.ai/v1/flux-2-pro";
+
+            $data = [
+                "prompt" => $prompt,
+                "width" => $width,
+                "height" => $height,
+                "safety_tolerance" => $safetyTolerance,
+                "output_format" => $outputFormat,
+            ];
+
+            if (!is_null($seed)) {
+                $data["seed"] = $seed;
+            }
+
+            if (!empty($inputImage)) {
+                $data["input_image"] = $inputImage;
+            }
+
+            if (!empty($additionalImages) && is_array($additionalImages)) {
+                $imageFields = ['input_image_2', 'input_image_3', 'input_image_4', 'input_image_5', 'input_image_6', 'input_image_7', 'input_image_8'];
+                foreach ($additionalImages as $index => $imageUrl) {
+                    if ($index < count($imageFields) && !empty($imageUrl)) {
+                        $data[$imageFields[$index]] = $imageUrl;
+                    }
+                }
+            }
+
+            if (!empty($webhookUrl)) {
+                $data["webhook_url"] = $webhookUrl;
+            }
+            if (!empty($webhookSecret)) {
+                $data["webhook_secret"] = $webhookSecret;
+            }
+
+            $data_string = json_encode($data);
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'x-key: ' . env('FLUXPRO_API_KEY')
+            ]);
+            curl_setopt($ch, CURLOPT_POST, 1);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data_string);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+            $response = curl_exec($ch);
+            curl_close($ch);
+
+            $response_data = json_decode($response, true);
+
+            if (!isset($response_data['error'])) {
+                if (isset($response_data['id'])) {
+                    return [
+                        'data' => $response_data['id'],
+                        'polling_url' => $response_data['polling_url'] ?? null
+                    ];
+                }
+
+                return ['error' => $response_data];
+            }
+
+            return ['error' => $response_data['error']];
+        } catch (\Exception $e) {
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    public static function GetResultFromPollingUrl(string $pollingUrl)
+    {
+        try {
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $pollingUrl);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'x-key: ' . env('FLUXPRO_API_KEY')
+            ]);
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'GET');
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            $response = curl_exec($ch);
+            $response_data = json_decode($response, true);
+            curl_close($ch);
+
+            if (!isset($response_data['error'])) {
+                if (isset($response_data['status'])) {
+                    $status = $response_data['status'];
+                    switch ($status) {
+                        case 'Ready':
+                            return [
+                                'status' => 'complete',
+                                'data' => $response_data['result']['sample']
+                            ];
+                        case 'Pending':
+                        case 'Request Moderated':
+                        case 'Content Moderated':
+                            return [
+                                'status' => 'pending',
+                                'message' => 'La imagen aún se está generando'
+                            ];
+                        case 'Error':
+                            return [
+                                'status' => 'failed',
+                                'message' => 'La generación de la imagen falló'
+                            ];
+                        default:
+                            return [
+                                'status' => 'unknown',
+                                'message' => 'Estado desconocido: ' . $status
+                            ];
+                    }
+                }
+
+                return ['error' => $response_data];
+            }
+
+            return [
+                'status' => 'error',
+                'error' => $response_data['error']
+            ];
+        } catch (\Exception $e) {
+            return [
+                'status' => 'error',
+                'error' => $e->getMessage()
+            ];
+        }
+    }
 }

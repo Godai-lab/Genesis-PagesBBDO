@@ -106,11 +106,58 @@
     <!-- ToolSelector -->
     <div class="type-selector-fixed">
     <section aria-label="Selector de herramientas" class="bg-white/70 dark:bg-zinc-900/70 backdrop-blur rounded-xl p-4">
-        <div class="flex justify-center">
+        <div class="flex justify-between items-center gap-4">
+            
+            <!-- ✅ NUEVO: Selector de cuenta (IZQUIERDA) -->
+            @if(count($availableAccounts) > 0)
+            <div class="flex items-center gap-2 min-w-[250px]">
+                <label for="account-selector" class="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                    </svg>
+                    Cuenta:
+                </label>
+                <select 
+                    id="account-selector"
+                    wire:model.live="selectedAccountId"
+                    class="block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 shadow-sm focus:border-black focus:ring-black text-sm"
+                    @if(!$isSuperAdmin && count($availableAccounts) === 1) disabled @endif
+                >
+                    @if($isSuperAdmin)
+                        <option value="">-- Seleccionar cuenta --</option>
+                    @endif
+                    
+                    @foreach($availableAccounts as $account)
+                        <option value="{{ $account['id'] }}">
+                            {{ $account['name'] }}
+                        </option>
+                    @endforeach
+                </select>
+            </div>
+            @elseif($isSuperAdmin)
+                <!-- Super admin sin cuentas en el sistema -->
+                <div class="flex items-center gap-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-md min-w-[250px]">
+                    <svg class="w-4 h-4 text-yellow-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <span class="text-xs text-yellow-800">No hay cuentas disponibles</span>
+                </div>
+            @else
+                <!-- Usuario sin cuentas asignadas -->
+                <div class="flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded-md min-w-[250px]">
+                    <svg class="w-4 h-4 text-red-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span class="text-xs text-red-800">No tienes cuentas asignadas</span>
+                </div>
+            @endif
+            
+            <!-- Selector de herramientas (CENTRO) -->
+            <div class="flex-1 flex justify-center">
             <div class="flex bg-gray-100 rounded-full p-1 w-fit shadow-sm">
                 {{-- 1. PROMPT GENERATOR (Primero) --}}
                 @if(isset($tools['prompt-generator']))
-                    {{-- @can('haveaccess','generador.prompt') --}}
+                  
                     <button 
                         wire:click="setActiveTool('prompt-generator')"
                         type="button"
@@ -121,7 +168,7 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ $tools['prompt-generator']['icon'] }}" />
                         </svg>
                     </button>
-                    {{-- @endcan --}}
+                
                 @endif
 
                 {{-- 2. IMAGE GENERATOR --}}
@@ -174,7 +221,7 @@
 
                 {{-- 5. VIDEO EDITOR --}}
                 @if(isset($tools['video-editor']))
-                   @can('haveaccess','generador.video')
+                    @can('haveaccess','generador.video')
                     <button 
                         wire:click="setActiveTool('video-editor')"
                         type="button"
@@ -220,6 +267,10 @@
                     @endcan
                 @endif --}}
             </div>
+            </div>
+            
+            <!-- Espacio para balance visual (DERECHA) -->
+            <div class="min-w-[250px]"></div>
         </div>
     </section>
      <!-- Sección de Errores -->
@@ -284,18 +335,20 @@
         </div>
     </div>
 
-    @if(empty($history))
-        <div class="text-center py-8">
-            <svg class="w-12 h-12 mx-auto text-zinc-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 002 2z" />
-            </svg>
-            <p class="text-sm text-zinc-500">Aún no hay resultados en el historial.</p>
-            <p class="text-xs text-zinc-400 mt-1">Genera tu primera imagen para comenzar</p>
-        </div>
-    @else
-        <div id="history-container" class="space-y-6">
-            @foreach($history as $index => $item)
-                <div id="history-item-{{ $index }}" class="bg-white rounded-xl border border-zinc-200 p-4 history-item">
+    {{-- ✅ SOLUCIÓN: wire:key dinámico ENVOLVIENDO todo para forzar re-render cuando pasa de vacío a con contenido --}}
+    <div wire:key="history-wrapper-{{ $historyVersion }}-{{ count($history) }}">
+        @if(empty($history))
+            <div class="text-center py-8">
+                <svg class="w-12 h-12 mx-auto text-zinc-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 002 2z" />
+                </svg>
+                <p class="text-sm text-zinc-500">Aún no hay resultados en el historial.</p>
+                <p class="text-xs text-zinc-400 mt-1">Genera tu primera imagen para comenzar</p>
+            </div>
+        @else
+            <div id="history-container" class="space-y-6">
+                @foreach($history as $index => $item)
+                <div wire:key="history-item-{{ $index }}-{{ $item['date'] ?? 'unknown' }}" id="history-item-{{ $index }}" class="bg-white rounded-xl border border-zinc-200 p-4 history-item">
                     @if(isset($item['images']) && is_array($item['images']))
                         {{-- Grupo de imágenes de una misma generación --}}
                         <div class="mb-3">
@@ -307,20 +360,27 @@
                                     {{ \Carbon\Carbon::parse($item['date'])->format('H:i') }}
                                 </span>
                             </div>
-                            <div class="text-xs text-zinc-500 mb-3 flex gap-2">
+                            <div class="text-xs text-zinc-500 flex gap-2">
                                 <span>{{ $item['model'] ?? 'N/A' }}</span>
                                 <span>•</span>
                                 <span>{{ $item['ratio'] ?? 'N/A' }}</span>
                                 <span>•</span>
                                 <span>{{ count($item['images']) }} {{ $item['type'] === 'video/generate' ? 'video' : 'imagen' }}{{ count($item['images']) > 1 ? 'es' : '' }}</span>
                             </div>
+                            @if(!empty($item['prompt']))
+                            <p class="mt-1 mb-3 text-xs text-zinc-500 dark:text-zinc-400 italic line-clamp-2">
+                                "{{ $item['prompt'] }}"
+                            </p>
+                            @else
+                            <div class="mb-3"></div>
+                            @endif
                         </div>
                         
                         {{-- Grid de imágenes/videos de la misma generación --}}
                         <div class="images-container">
                             <div class="flex gap-3 overflow-x-auto pb-2" style="scrollbar-width: thin;">
-                                @foreach($item['images'] as $image)
-                                    <div class="image-card flex-shrink-0 relative group">
+                                @foreach($item['images'] as $imageIndex => $image)
+                                    <div wire:key="image-{{ $index }}-{{ $imageIndex }}-{{ $image['url'] ?? 'unknown' }}" class="image-card flex-shrink-0 relative group">
                                         @if($item['type'] === 'video/generate')
                                             {{-- Renderizar como VIDEO --}}
                                             <video 
@@ -360,7 +420,7 @@
                                                 </button>
                                                 @endcan
                                                 
-                                                @can('haveaccess','generador.video')
+                                                @can('haveaccess','generate.video')
                                                 <button 
                                                     @click.stop="generateVideoFromHistory('{{ $image['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '1:1' }}')"
                                                     class="bg-blue-600/80 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"
@@ -373,7 +433,7 @@
                                                 </button>
                                                 @endcan
                                             @else
-                                                @can('haveaccess','generador.video')
+                                                @can('haveaccess','edit.video')
                                                 <button 
                                                     @click.stop="editVideoFromHistory('{{ $image['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '16:9' }}')"
                                                     class="bg-purple-600/80 hover:bg-purple-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"
@@ -548,8 +608,9 @@
                     @endif
                 </div>
             @endforeach
-        </div>
-    @endif
+            </div>
+        @endif
+    </div>
 </section>
     
         <!-- Área de herramienta activa fija al fondo -->
@@ -557,17 +618,20 @@
             @switch($activeTool)
                 @case('image-generator')
                     <livewire:generador.herramientas.image-generator
-            wire:key="image-generator-tool" />
+                        wire:key="image-generator-tool"
+                        :accountId="$selectedAccountId" />
                     @break
 
                 @case('image-editor')
                     <livewire:generador.herramientas.image-editor
-            wire:key="image-editor-tool" />
+                        wire:key="image-editor-tool"
+                        :accountId="$selectedAccountId" />
                     @break
 
                 @case('video-generator')
                     <livewire:generador.herramientas.video-generator
-            wire:key="video-generator-tool" />
+                        wire:key="video-generator-tool"
+                        :accountId="$selectedAccountId" />
                     @break
 
                 @case('image-editor-expand')
@@ -580,12 +644,14 @@
 
                 @case('video-editor')
                     <livewire:generador.herramientas.video-editor
-            wire:key="video-editor-tool" />
+                        wire:key="video-editor-tool"
+                        :accountId="$selectedAccountId" />
                     @break
 
                 @case('prompt-generator')
                     <livewire:generador.herramientas.prompt-generator
-            wire:key="prompt-generator-tool" />
+                        wire:key="prompt-generator-tool"
+                        :accountId="$selectedAccountId" />
                     @break
             @endswitch
 </section>
@@ -658,97 +724,8 @@ style="display: none;"
     </div>
 </div>
 
+{{-- ✅ FUNCIONES GLOBALES (fuera de @script para que Alpine las encuentre) --}}
 <script>
-document.addEventListener('livewire:init', () => {
-    // Escuchar evento de scroll automático
-    Livewire.on('scrollToLatest', () => {
-    // Espera adicional para que Livewire termine de pintar todo
-    setTimeout(() => {
-        window.scrollTo({
-            top: document.documentElement.scrollHeight,
-            behavior: 'smooth'
-        });
-    }, 1500); 
-});
-});
-
-// Función para descargar archivos (imágenes o videos) desde S3 usando fetch
-async function downloadFile(fileUrl, fileType) {
-    try {
-        console.log(`🔽 Iniciando descarga de ${fileType}:`, fileUrl);
-        
-        // Mostrar indicador de descarga
-        const button = event.target;
-        const originalText = button.textContent;
-        button.textContent = 'Descargando...';
-        button.disabled = true;
-        
-        // Fetch del archivo desde S3
-        const response = await fetch(fileUrl);
-        if (!response.ok) {
-            throw new Error(`Error al descargar el ${fileType}`);
-        }
-        
-        // Convertir a blob
-        const blob = await response.blob();
-        
-        // Crear URL temporal
-        const blobUrl = window.URL.createObjectURL(blob);
-        
-        // Crear elemento <a> temporal para descarga
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        
-        // Generar nombre de archivo basado en timestamp y tipo
-        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
-        let extension = 'mp4'; // Por defecto para videos
-        let prefix = 'video';
-        
-        if (fileType === 'image') {
-            extension = fileUrl.includes('.png') ? 'png' : 'jpg';
-            prefix = 'imagen';
-        }
-        
-        link.download = `${prefix}_generado_${timestamp}.${extension}`;
-        
-        // Agregar al DOM temporalmente y hacer clic
-        document.body.appendChild(link);
-        link.click();
-        
-        // Limpiar
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(blobUrl);
-        
-        console.log(`✅ ${fileType} descargado exitosamente`);
-        
-        // Restaurar botón
-        button.textContent = originalText;
-        button.disabled = false;
-        
-    } catch (error) {
-        console.error(`❌ Error descargando ${fileType}:`, error);
-        
-        // Restaurar botón en caso de error
-        const button = event.target;
-        button.textContent = 'Error al descargar';
-        button.disabled = false;
-        
-        // Restaurar texto después de 2 segundos
-        setTimeout(() => {
-            button.textContent = 'Descargar';
-        }, 2000);
-        
-        // Fallback: intentar descarga directa
-        const link = document.createElement('a');
-        link.href = fileUrl;
-        link.download = `${fileType}_${Date.now()}.${fileType === 'image' ? 'jpg' : 'mp4'}`;
-        link.target = '_blank';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    }
-}
-
 // Variable global para almacenar datos de imagen pendiente
 window.pendingImageData = null;
 
@@ -928,9 +905,116 @@ function copyToClipboard(text) {
     });
 }
 
-// Listener para cuando el ImageGenerator esté listo
-document.addEventListener('livewire:init', () => {
-    Livewire.on('imageGeneratorReady', () => {
+// Función para descargar archivos (imágenes o videos) desde S3 usando fetch
+async function downloadFile(fileUrl, fileType) {
+    try {
+        console.log(`🔽 Iniciando descarga de ${fileType}:`, fileUrl);
+        
+        // Mostrar indicador de descarga
+        const button = event.target;
+        const originalText = button.textContent;
+        button.textContent = 'Descargando...';
+        button.disabled = true;
+        
+        // Fetch del archivo desde S3
+        const response = await fetch(fileUrl);
+        if (!response.ok) {
+            throw new Error(`Error al descargar el ${fileType}`);
+        }
+        
+        // Convertir a blob
+        const blob = await response.blob();
+        
+        // Crear URL temporal
+        const blobUrl = window.URL.createObjectURL(blob);
+        
+        // Crear elemento <a> temporal para descarga
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        
+        // Generar nombre de archivo basado en timestamp y tipo
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
+        let extension = 'mp4'; // Por defecto para videos
+        let prefix = 'video';
+        
+        if (fileType === 'image') {
+            extension = fileUrl.includes('.png') ? 'png' : 'jpg';
+            prefix = 'imagen';
+        }
+        
+        link.download = `${prefix}_generado_${timestamp}.${extension}`;
+        
+        // Agregar al DOM temporalmente y hacer clic
+        document.body.appendChild(link);
+        link.click();
+        
+        // Limpiar
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(blobUrl);
+        
+        console.log(`✅ ${fileType} descargado exitosamente`);
+        
+        // Restaurar botón
+        button.textContent = originalText;
+        button.disabled = false;
+        
+    } catch (error) {
+        console.error(`❌ Error descargando ${fileType}:`, error);
+        
+        // Restaurar botón en caso de error
+        const button = event.target;
+        button.textContent = 'Error al descargar';
+        button.disabled = false;
+        
+        // Restaurar texto después de 2 segundos
+        setTimeout(() => {
+            button.textContent = 'Descargar';
+        }, 2000);
+        
+        // Fallback: intentar descarga directa
+        const link = document.createElement('a');
+        link.href = fileUrl;
+        link.download = `${fileType}_${Date.now()}.${fileType === 'image' ? 'jpg' : 'mp4'}`;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+}
+</script>
+
+@script
+<script>
+(function(){
+    console.log('🎬 Iniciando GeneradorMain desde main');
+    
+    // Escuchar evento de scroll automático
+    Livewire.on('scrollToLatest', function() {
+        console.log('📜 ScrollToLatest disparado');
+        // Espera adicional para que Livewire termine de pintar todo
+        setTimeout(function() {
+            window.scrollTo({
+                top: document.documentElement.scrollHeight,
+                behavior: 'smooth'
+            });
+        }, 1500); 
+    });
+    
+    // ✅ NUEVO: Escuchar cuando se agrega contenido al historial
+    Livewire.on('historyUpdated', function() {
+        console.log('📝 Historial actualizado - forzando re-render');
+        // Forzar re-render del componente principal
+        Livewire.dispatch('$refresh');
+    });
+    
+    console.log('📜 GeneradorMain: listeners básicos registrados');
+})();
+
+// ✅ SEPARADO: Listeners específicos que necesitan livewire:init
+document.addEventListener('livewire:init', function() {
+    console.log('🎬 Livewire inicializado - registrando listeners específicos');
+    
+    Livewire.on('imageGeneratorReady', function() {
         // Si hay datos de prompt pendientes, enviarlos ahora
         if (window.pendingPromptData) {
             Livewire.dispatch('loadPromptForImageGeneration', [window.pendingPromptData]);
@@ -940,7 +1024,7 @@ document.addEventListener('livewire:init', () => {
         }
     });
     
-    Livewire.on('videoGeneratorReady', () => {
+    Livewire.on('videoGeneratorReady', function() {
         // Si hay datos de prompt pendientes para video, enviarlos ahora
         if (window.pendingVideoPromptData) {
             Livewire.dispatch('loadPromptForVideoGeneration', [window.pendingVideoPromptData]);
@@ -950,7 +1034,7 @@ document.addEventListener('livewire:init', () => {
         }
     });
     
-    Livewire.on('videoEditorReady', () => {
+    Livewire.on('videoEditorReady', function() {
         // Si hay datos de video pendientes para edición, enviarlos ahora
         if (window.pendingVideoEditData) {
             Livewire.dispatch('loadVideoFromHistory', [
@@ -964,10 +1048,89 @@ document.addEventListener('livewire:init', () => {
             window.pendingVideoEditData = null;
         }
     });
+    
+    console.log('📜 GeneradorMain: listeners específicos registrados');
 });
 
-</script>
+// Función para descargar archivos (imágenes o videos) desde S3 usando fetch
+async function downloadFile(fileUrl, fileType) {
+    try {
+        console.log(`🔽 Iniciando descarga de ${fileType}:`, fileUrl);
+        
+        // Mostrar indicador de descarga
+        const button = event.target;
+        const originalText = button.textContent;
+        button.textContent = 'Descargando...';
+        button.disabled = true;
+        
+        // Fetch del archivo desde S3
+        const response = await fetch(fileUrl);
+        if (!response.ok) {
+            throw new Error(`Error al descargar el ${fileType}`);
+        }
+        
+        // Convertir a blob
+        const blob = await response.blob();
+        
+        // Crear URL temporal
+        const blobUrl = window.URL.createObjectURL(blob);
+        
+        // Crear elemento <a> temporal para descarga
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        
+        // Generar nombre de archivo basado en timestamp y tipo
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
+        let extension = 'mp4'; // Por defecto para videos
+        let prefix = 'video';
+        
+        if (fileType === 'image') {
+            extension = fileUrl.includes('.png') ? 'png' : 'jpg';
+            prefix = 'imagen';
+        }
+        
+        link.download = `${prefix}_generado_${timestamp}.${extension}`;
+        
+        // Agregar al DOM temporalmente y hacer clic
+        document.body.appendChild(link);
+        link.click();
+        
+        // Limpiar
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(blobUrl);
+        
+        console.log(`✅ ${fileType} descargado exitosamente`);
+        
+        // Restaurar botón
+        button.textContent = originalText;
+        button.disabled = false;
+        
+    } catch (error) {
+        console.error(`❌ Error descargando ${fileType}:`, error);
+        
+        // Restaurar botón en caso de error
+        const button = event.target;
+        button.textContent = 'Error al descargar';
+        button.disabled = false;
+        
+        // Restaurar texto después de 2 segundos
+        setTimeout(() => {
+            button.textContent = 'Descargar';
+        }, 2000);
+        
+        // Fallback: intentar descarga directa
+        const link = document.createElement('a');
+        link.href = fileUrl;
+        link.download = `${fileType}_${Date.now()}.${fileType === 'image' ? 'jpg' : 'mp4'}`;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+}
 
+</script>
+@endscript
 </div>
 
 

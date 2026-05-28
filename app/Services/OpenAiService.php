@@ -792,7 +792,7 @@ class OpenAiService
         return ['error' => 'Excepción al generar imagen: ' . $e->getMessage()];
     }
 }
-    public static function editImage($prompt, array $imagePaths, $model = 'gpt-image-1', $size = '1024x1024', $background = 'auto', $n = 1)
+    public static function editImage($prompt, array $imagePaths, $model = 'gpt-image-1', $size = '1024x1024', $background = 'auto', $n = 1, $quality = null)
 {
     try {
         $url = "https://api.openai.com/v1/images/edits";
@@ -811,6 +811,10 @@ class OpenAiService
             'background' => $background,
             'n' => $n
         ];
+
+        if ($quality !== null) {
+            $params['quality'] = $quality;
+        }
 
         foreach ($params as $key => $value) {
             $body .= "--$delimiter$eol";
@@ -855,7 +859,8 @@ class OpenAiService
         if (!isset($response_data['error'])) {
             return [
                 'data' => $response_data['data'],
-                'created' => $response_data['created'],
+                'created' => $response_data['created'] ?? null,
+                'usage' => $response_data['usage'] ?? null,
             ];
         } else {
             return ['error' => $response_data['error']['message']];
@@ -1072,6 +1077,274 @@ class OpenAiService
             'max_wait_time' => $maxWaitTime
         ]);
         return ['error' => 'Tiempo de espera agotado. La respuesta puede estar aún procesándose.'];
+    }
+
+    /**
+     * 1️⃣ Inicia la generación de video
+     * Crea un nuevo trabajo de video en OpenAI usando multipart/form-data.
+     *
+     * @param string $prompt Descripción del video a generar
+     * @param string $model Modelo a usar (sora-2 o sora-2-pro)
+     * @param string $size Tamaño del video (ej: 720x1280)
+     * @param string $seconds Duración en segundos
+     * @param array|null $imageData Array con ['content', 'mimeType', 'fileName'] para input_reference (ya redimensionada)
+     */
+    public static function createVideo($prompt, $model = 'sora-2', $size = '720x1280', $seconds = "4", $imageData = null)
+    {
+        try {
+            $url = "https://api.openai.com/v1/videos";
+
+            $boundary = uniqid();
+            $delimiter = '-------------' . $boundary;
+            $eol = "\r\n";
+
+            $body = '';
+
+            $fields = [
+                'model' => $model,
+                'prompt' => $prompt,
+                'size' => $size,
+                'seconds' => $seconds
+            ];
+
+            foreach ($fields as $key => $value) {
+                $body .= "--$delimiter$eol";
+                $body .= "Content-Disposition: form-data; name=\"$key\"$eol$eol";
+                $body .= "$value$eol";
+            }
+
+            if ($imageData && !empty($imageData['content'])) {
+                $imageContent = $imageData['content'];
+                $mimeType = $imageData['mimeType'] ?? 'image/jpeg';
+                $fileName = $imageData['fileName'] ?? 'image.jpg';
+
+                $body .= "--$delimiter$eol";
+                $body .= "Content-Disposition: form-data; name=\"input_reference\"; filename=\"$fileName\"$eol";
+                $body .= "Content-Type: $mimeType$eol$eol";
+                $body .= $imageContent . $eol;
+
+                Log::info('📷 Agregando input_reference a la solicitud', [
+                    'fileName' => $fileName,
+                    'mimeType' => $mimeType,
+                    'targetSize' => $size,
+                    'imageFileSize' => strlen($imageContent),
+                    'imageSizeKB' => round(strlen($imageContent) / 1024, 2)
+                ]);
+            }
+
+            $body .= "--$delimiter--$eol";
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                "Content-Type: multipart/form-data; boundary=$delimiter",
+                'Authorization: Bearer ' . env('OPENAI_API_KEY_GENERATE_VIDEO')
+            ]);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 180);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 60);
+
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            Log::info('Respuesta de OpenAI createVideo', [
+                'http_code' => $http_code,
+                'response_length' => strlen($response),
+                'model' => $model,
+                'withImage' => $imageData !== null
+            ]);
+
+            $response_data = json_decode($response, true);
+
+            if (!is_array($response_data)) {
+                Log::error('Respuesta malformada al crear video', ['response' => $response]);
+                return ['error' => 'Respuesta malformada de OpenAI'];
+            }
+
+            if (isset($response_data['error'])) {
+                Log::error('Error al crear video OpenAI', $response_data);
+                return ['error' => $response_data['error']['message']];
+            }
+
+            return $response_data;
+
+        } catch (\Exception $e) {
+            Log::error('Excepción al crear video OpenAI', ['exception' => $e]);
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * 2️⃣ Consulta el estado del video (progreso, status)
+     */
+    public static function getVideoStatus($videoId)
+    {
+        try {
+            ini_set('max_execution_time', 180);
+
+            $url = "https://api.openai.com/v1/videos/{$videoId}";
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . env('OPENAI_API_KEY_GENERATE_VIDEO')
+            ]);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
+
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curl_error = curl_error($ch);
+            $curl_errno = curl_errno($ch);
+            curl_close($ch);
+
+            if ($response === false) {
+                Log::error('Error cURL al consultar estado video', [
+                    'videoId' => $videoId,
+                    'curl_error' => $curl_error,
+                    'curl_errno' => $curl_errno,
+                    'http_code' => $http_code
+                ]);
+                return ['error' => 'Error de conexión: ' . ($curl_error ?: 'Error desconocido de cURL')];
+            }
+
+            if (empty($response)) {
+                Log::error('Respuesta vacía al consultar estado video', [
+                    'videoId' => $videoId,
+                    'http_code' => $http_code,
+                    'curl_error' => $curl_error
+                ]);
+                return ['error' => 'Respuesta vacía de la API'];
+            }
+
+            $data = json_decode($response, true);
+
+            Log::info('Respuesta de OpenAI getVideoStatus', [
+                'http_code' => $http_code,
+                'videoId' => $videoId,
+                'response_length' => strlen($response),
+                'status' => $data['status'] ?? 'unknown',
+                'hasError' => isset($data['error']),
+                'curl_error' => $curl_error
+            ]);
+
+            if ($data === null) {
+                Log::error('Error al decodificar JSON del estado video', [
+                    'response' => $response,
+                    'videoId' => $videoId,
+                    'json_error' => json_last_error_msg()
+                ]);
+                return ['error' => 'Error al decodificar respuesta JSON'];
+            }
+
+            if (!is_array($data)) {
+                Log::error('Respuesta malformada al obtener estado video', [
+                    'response' => $response,
+                    'videoId' => $videoId,
+                    'data_type' => gettype($data)
+                ]);
+                return ['error' => 'Respuesta malformada'];
+            }
+
+            if (isset($data['error'])) {
+                $errorMessage = $data['error']['message'] ?? 'Error desconocido';
+
+                Log::error('Error al obtener estado video OpenAI', [
+                    'error' => $data['error'],
+                    'errorMessage' => $errorMessage,
+                    'videoId' => $videoId,
+                    'fullResponse' => $data
+                ]);
+
+                return ['error' => $errorMessage];
+            }
+
+            return $data;
+        } catch (\Exception $e) {
+            Log::error('Error al consultar estado video OpenAI', [
+                'exception' => $e->getMessage(),
+                'videoId' => $videoId
+            ]);
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * 3️⃣ Obtiene el contenido binario del video final (MP4)
+     */
+    public static function getVideoContent($videoId, $variant = null)
+    {
+        try {
+            ini_set('max_execution_time', 300);
+
+            $url = "https://api.openai.com/v1/videos/{$videoId}/content";
+            if ($variant) {
+                $url .= "?variant={$variant}";
+            }
+
+            Log::info('Solicitando contenido binario del video', [
+                'videoId' => $videoId,
+                'url' => $url,
+                'variant' => $variant
+            ]);
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Authorization: Bearer ' . env('OPENAI_API_KEY_GENERATE_VIDEO')
+            ]);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 300);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 60);
+
+            $binary = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+            curl_close($ch);
+
+            Log::info('Respuesta de contenido binario recibida', [
+                'videoId' => $videoId,
+                'httpCode' => $httpCode,
+                'contentType' => $contentType,
+                'binarySize' => strlen($binary),
+                'binarySizeKB' => round(strlen($binary) / 1024, 2),
+                'binarySizeMB' => round(strlen($binary) / 1024 / 1024, 2)
+            ]);
+
+            if ($curlError) {
+                Log::error('Error CURL al obtener contenido binario', [
+                    'videoId' => $videoId,
+                    'error' => $curlError
+                ]);
+                return ['error' => 'Error CURL: ' . $curlError];
+            }
+
+            if ($httpCode !== 200) {
+                Log::error('Error HTTP al obtener contenido binario', [
+                    'videoId' => $videoId,
+                    'httpCode' => $httpCode,
+                    'responseLength' => strlen($binary)
+                ]);
+                return ['error' => 'Error HTTP: ' . $httpCode];
+            }
+
+            return ['success' => true, 'binary' => $binary];
+
+        } catch (\Exception $e) {
+            Log::error('Excepción al obtener contenido del video', [
+                'exception' => $e->getMessage(),
+                'videoId' => $videoId,
+                'trace' => $e->getTraceAsString()
+            ]);
+            return ['error' => $e->getMessage()];
+        }
     }
 
 }

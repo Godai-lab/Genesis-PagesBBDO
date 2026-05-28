@@ -6,6 +6,8 @@ use Livewire\Component;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
+use App\Models\Account;
 
 /**
  * Componente contenedor principal para herramientas de IA.
@@ -13,6 +15,7 @@ use Illuminate\Support\Facades\Log;
  * - Mantiene el estado de la herramienta activa
  * - Registra un historial unificado de resultados
  * - Expone eventos para coordinarse con herramientas hijas
+ * - Gestiona la selección de cuenta para todas las herramientas
  */
 class GeneradorMain extends Component
 {
@@ -29,10 +32,35 @@ class GeneradorMain extends Component
     public array $history = [];
 
     /**
+     * Contador para forzar re-render del historial.
+     * Se incrementa cada vez que se agrega un item para forzar que Livewire
+     * detecte el cambio y re-renderice el componente.
+     */
+    public int $historyVersion = 0;
+
+    /**
      * Lista de errores recientes para mostrar al usuario.
      * Formato: ['message' => string, 'type' => string, 'date' => string, 'tool' => string]
      */
     public array $errors = [];
+
+    /**
+     * Cuenta seleccionada actualmente para las generaciones.
+     * Null significa que no hay cuenta seleccionada (super admin sin selección)
+     */
+    public ?int $selectedAccountId = null;
+
+    /**
+     * Cuentas disponibles para el usuario actual.
+     * Para super admins: todas las cuentas del sistema
+     * Para usuarios normales: solo sus cuentas asignadas
+     */
+    public array $availableAccounts = [];
+
+    /**
+     * Indica si el usuario actual es super admin
+     */
+    public bool $isSuperAdmin = false;
 
     /**
      * Catálogo de herramientas disponibles y sus etiquetas.
@@ -91,7 +119,133 @@ class GeneradorMain extends Component
         $this->dispatch('scrollToLatest');
 
         $this->history = session('generador.history', []);
+        $this->historyVersion = session('generador.historyVersion', 0);
         $this->errors = session('generador.errors', []);
+
+        // ✅ Inicializar selección de cuenta
+        $this->initializeAccountSelection();
+    }
+
+    /**
+     * Inicializa la selección de cuenta según el tipo de usuario
+     */
+    private function initializeAccountSelection(): void
+    {
+        $user = Auth::user();
+        
+        if (!$user) {
+            return;
+        }
+        
+        // Verificar si es super admin
+        $this->isSuperAdmin = $user->haveFullAccess();
+        
+        if ($this->isSuperAdmin) {
+            // Super admin: obtener TODAS las cuentas del sistema
+            $this->availableAccounts = Account::select('id', 'name')
+                ->where('status', 1) // Solo cuentas activas
+                ->orderBy('name')
+                ->get()
+                ->map(function($account) {
+                    return [
+                        'id' => $account->id,
+                        'name' => $account->name
+                    ];
+                })
+                ->toArray();
+                
+            // Para super admin, intentar obtener de sesión pero no auto-seleccionar
+            $sessionAccountId = session('generador.selectedAccountId');
+            
+            // Validar que la cuenta de sesión exista en las cuentas disponibles
+            if ($sessionAccountId && collect($this->availableAccounts)->pluck('id')->contains($sessionAccountId)) {
+                $this->selectedAccountId = $sessionAccountId;
+            }
+            // Si no hay sesión, selectedAccountId queda en null (obligando a seleccionar)
+        } else {
+            // Usuario normal: solo sus cuentas asignadas
+            $this->availableAccounts = $user->accounts()
+                ->select('id', 'name')
+                ->where('status', 1)
+                ->orderBy('name')
+                ->get()
+                ->map(function($account) {
+                    return [
+                        'id' => $account->id,
+                        'name' => $account->name
+                    ];
+                })
+                ->toArray();
+            
+            // Auto-seleccionar la primera cuenta si existe
+            if (!empty($this->availableAccounts)) {
+                // Intentar obtener de sesión primero
+                $sessionAccountId = session('generador.selectedAccountId');
+                
+                if ($sessionAccountId && collect($this->availableAccounts)->pluck('id')->contains($sessionAccountId)) {
+                    $this->selectedAccountId = $sessionAccountId;
+                } else {
+                    // Seleccionar la primera cuenta disponible
+                    $this->selectedAccountId = $this->availableAccounts[0]['id'];
+                }
+            }
+        }
+        
+        // Guardar en sesión
+        if ($this->selectedAccountId) {
+            session(['generador.selectedAccountId' => $this->selectedAccountId]);
+        }
+        
+        Log::info('🏢 Cuentas inicializadas para generador', [
+            'user_id' => $user->id,
+            'is_super_admin' => $this->isSuperAdmin,
+            'available_accounts' => count($this->availableAccounts),
+            'selected_account_id' => $this->selectedAccountId
+        ]);
+    }
+
+    /**
+     * Hook de Livewire que se ejecuta cuando selectedAccountId cambia
+     * Este se dispara automáticamente por wire:model.live
+     */
+    public function updatedSelectedAccountId($value): void
+    {
+        // Validar que el usuario tenga acceso a esta cuenta
+        if ($value) {
+            $hasAccess = $this->isSuperAdmin || 
+                         collect($this->availableAccounts)->pluck('id')->contains((int)$value);
+            
+            if (!$hasAccess) {
+                $this->dispatch('addErrorToList', 
+                    message: 'No tienes acceso a esta cuenta', 
+                    type: 'validation'
+                );
+                // Revertir al valor anterior
+                $this->selectedAccountId = session('generador.selectedAccountId');
+                return;
+            }
+        }
+        
+        // Guardar en sesión
+        session(['generador.selectedAccountId' => $value]);
+        
+        Log::info('🔄 Cuenta seleccionada cambiada', [
+            'user_id' => Auth::id(),
+            'account_id' => $value,
+            'via' => 'updatedSelectedAccountId'
+        ]);
+        
+        // Notificar a las herramientas del cambio
+        $this->dispatch('accountChanged', accountId: $value);
+    }
+
+    /**
+     * Cambiar la cuenta seleccionada (método alternativo para llamadas manuales)
+     */
+    public function selectAccount(?int $accountId): void
+    {
+        $this->selectedAccountId = $accountId;
+        // El hook updatedSelectedAccountId se encargará del resto
     }
 
     /**
@@ -156,16 +310,26 @@ class GeneradorMain extends Component
             $entry['url'] = $url;
         }
 
-        // 🔥 CLAVE: Primero leer de sesión para sincronizar
-        $currentHistory = session('generador.history', []);
-        $currentHistory[] = $entry;
+        // Agregar al historial
+        $this->history[] = $entry;
+        
+        // ✅ SOLUCIÓN: Incrementar versión para forzar re-render
+        // Esto hace que Livewire detecte un cambio de estado y re-renderice
+        $this->historyVersion++;
         
         // Guardar en sesión
-        session(['generador.history' => $currentHistory]);
+        session(['generador.history' => $this->history]);
+        session(['generador.historyVersion' => $this->historyVersion]);
         
-        // 🔥 CLAVE: Ahora actualizar la propiedad de Livewire
-        // Esto fuerza a Livewire a detectar el cambio
-        $this->history = $currentHistory;
+        // Log para debug
+        \Illuminate\Support\Facades\Log::info('📝 Historial actualizado', [
+            'totalItems' => count($this->history),
+            'version' => $this->historyVersion,
+            'lastEntry' => $entry['type'] ?? 'unknown'
+        ]);
+        
+        // ✅ NUEVO: Disparar evento de historial actualizado
+        $this->dispatch('historyUpdated', version: $this->historyVersion);
         
         // Disparar evento para scroll automático
         $this->dispatch('scrollToLatest');
@@ -175,7 +339,9 @@ class GeneradorMain extends Component
     public function clearHistory(): void
     {
         $this->history = [];
+        $this->historyVersion = 0;
         session()->forget('generador.history');
+        session()->forget('generador.historyVersion');
     }
 
     /**

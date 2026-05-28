@@ -42,6 +42,39 @@
                 </button>
             </div>
 
+            {{-- Selector de cuenta (créditos / uso) --}}
+            <div class="px-4 py-3 border-b border-gray-300 bg-white">
+                @if(count($availableAccounts) > 0)
+                    <label for="presentaciones-account-selector" class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                        Cuenta
+                    </label>
+                    <select
+                        id="presentaciones-account-selector"
+                        wire:model.live="selectedAccountId"
+                        class="block w-full rounded-lg border-gray-300 text-sm shadow-sm focus:border-black focus:ring-black"
+                        @if(!$isSuperAdmin && count($availableAccounts) === 1) disabled @endif
+                    >
+                        @if($isSuperAdmin)
+                            <option value="">-- Seleccionar cuenta --</option>
+                        @endif
+                        @foreach($availableAccounts as $account)
+                            <option value="{{ $account['id'] }}">{{ $account['name'] }}</option>
+                        @endforeach
+                    </select>
+                    @if($isSuperAdmin && !$selectedAccountId)
+                        <p class="mt-1 text-xs text-amber-600">Selecciona una cuenta para registrar el uso y validar créditos.</p>
+                    @endif
+                @elseif($isSuperAdmin)
+                    <p class="text-xs text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-lg px-2 py-2">
+                        No hay cuentas activas en el sistema.
+                    </p>
+                @else
+                    <p class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-2 py-2">
+                        No tienes cuentas asignadas.
+                    </p>
+                @endif
+            </div>
+
             <!-- Conversations List -->
             <div class="flex-1 overflow-y-auto px-2 mt-4 space-y-2">
                 @if(!empty($conversations))
@@ -192,7 +225,18 @@
             </header>
 
     <style>
-        /* Estilos para la sección de errores */
+        /* Barra de errores fija arriba del contenido (como generador-main) */
+        .presentaciones-errors-bar {
+            position: sticky;
+            top: 0;
+            z-index: 30;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(8px);
+            border-bottom: 1px solid #e5e7eb;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        }
+
         .error-section {
             animation: slideDown 0.3s ease-out;
         }
@@ -217,46 +261,44 @@
         }
     </style>
 
-    <!-- Content Area (Chat Style) -->
-    <div class="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth" id="chat-container">
-        
-        <!-- Sección de Errores -->
-        @if(!empty($errors))
-        <section aria-label="Errores recientes" class="error-section bg-red-50 dark:bg-red-900/10 backdrop-blur rounded-xl p-4 mb-6 max-w-4xl mx-auto border border-red-100 dark:border-red-800/30">
+    {{-- Errores fuera del scroll (visible sin subir al inicio del chat) --}}
+    @if(!empty($errors))
+    <div class="presentaciones-errors-bar px-4 py-3">
+        <section aria-label="Errores recientes" class="error-section bg-gray-50 dark:bg-gray-800/20 backdrop-blur rounded-xl p-4 max-w-7xl mx-auto border border-gray-200 dark:border-gray-700">
             <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center gap-2">
                     <svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    <h3 class="text-sm font-semibold text-red-800 dark:text-red-300">Errores Recientes</h3>
+                    <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Errores Recientes</h3>
                 </div>
-                <button wire:click="clearErrors" type="button" class="text-xs px-3 py-1 rounded-md bg-red-100 hover:bg-red-200 dark:bg-red-800/30 dark:hover:bg-red-800/50 text-red-700 dark:text-red-200 transition-colors">
+                <button wire:click="clearErrors" type="button" class="text-xs px-3 py-1 rounded-md bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 transition-colors">
                     Limpiar Todo
                 </button>
             </div>
-    
-            <div class="space-y-2">
+
+            <div class="space-y-2 max-h-40 overflow-y-auto">
                 @foreach($errors as $error)
-                    <div class="error-item bg-white dark:bg-gray-900/50 rounded-lg border border-red-100 dark:border-red-800/30 p-3 relative shadow-sm">
+                    <div class="error-item bg-white dark:bg-gray-900/30 rounded-lg border border-red-200 dark:border-red-800/40 p-3 relative">
                         <div class="flex items-start justify-between gap-3">
                             <div class="flex-1 min-w-0">
                                 <p class="text-sm text-gray-800 dark:text-gray-200 break-words font-medium">
                                     {{ $error['message'] }}
                                 </p>
-                                <div class="flex items-center gap-2 mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                    <span class="capitalize bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-600 dark:text-gray-300">{{ $error['tool'] ?? 'Sistema' }}</span>
+                                <div class="flex items-center gap-2 mt-1 text-xs text-gray-600 dark:text-gray-400">
+                                    <span class="capitalize">{{ $error['tool'] ?? 'Sistema' }}</span>
                                     <span>•</span>
                                     <span>{{ \Carbon\Carbon::parse($error['date'])->format('H:i:s') }}</span>
                                     @if(isset($error['type']) && $error['type'] !== 'general')
                                         <span>•</span>
-                                        <span class="capitalize text-red-500">{{ $error['type'] }}</span>
+                                        <span class="capitalize text-red-600">{{ $error['type'] }}</span>
                                     @endif
                                 </div>
                             </div>
-                            <button 
-                                wire:click="dismissError('{{ $error['id'] }}')" 
-                                type="button" 
-                                class="flex-shrink-0 text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 transition-colors p-1"
+                            <button
+                                wire:click="dismissError('{{ $error['id'] }}')"
+                                type="button"
+                                class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors"
                                 title="Descartar error"
                             >
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -268,7 +310,11 @@
                 @endforeach
             </div>
         </section>
-        @endif
+    </div>
+    @endif
+
+    <!-- Content Area (Chat Style) -->
+    <div class="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth" id="chat-container">
 
         <div id="presentation-container" class="w-full max-w-7xl mx-auto space-y-12 pb-24 px-4 md:px-6 lg:px-8">
                     @if($activeConversation && !empty($activeConversation['presentations']))

@@ -208,16 +208,23 @@
             <div class="flex items-center justify-between px-4 pb-3">
                 <div class="flex flex-wrap items-center gap-2">
                     <!-- Ratio dropdown -->
-                    <div x-data="{ open: false }" class="relative">
+                    <div x-data="{ open: false }" class="relative group">
                         <button 
-                            @click="open = !open"
-                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                            @click="@if(!$ratioLocked) open = !open @endif"
+                            class="flex items-center space-x-1 {{ $ratioLocked ? 'bg-gray-300 cursor-not-allowed' : 'bg-gray-100 hover:bg-gray-200 cursor-pointer' }} rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                            @if($ratioLocked) disabled @endif
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
                             </svg>
                             <span>{{ $ratio }}</span>
+                            @if($ratioLocked)
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                </svg>
+                            @endif
                         </button>
+                        @if(!$ratioLocked)
                         <div 
                             x-show="open" 
                             x-cloak
@@ -238,20 +245,223 @@
                                 @endforeach
                             </div>
                         </div>
+                        @else
+                        <div class="absolute bottom-full left-0 mb-1 bg-gray-800 text-white text-xs rounded-lg px-3 py-2 w-[220px] z-20 shadow-lg hidden group-hover:block">
+                            Ratio bloqueado por imagen subida. Elimina la imagen para cambiar el ratio.
+                        </div>
+                        @endif
                     </div>
 
 
 
-                    <!-- Cantidad dropdown - Dinámico según el modelo -->
+                    <!-- Duración dropdown - Para Veo 3.1 (4, 6, 8s) -->
+                    @if($model === 'veo3.1')
                     <div x-data="{ open: false }" class="relative">
                         <button 
                             @click="open = !open"
                             class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
-                            <span>{{ $count }} {{ $count > 1 ? 'videos' : 'video' }}</span>
+                            <span>{{ $durationSeconds }}s</span>
+                        </button>
+                        <div 
+                            x-show="open" 
+                            x-cloak
+                            @click.away="open = false"
+                            class="absolute bottom-full left-0 mb-1 bg-white border border-gray-200 rounded-xl p-4 w-[200px] z-20 shadow-lg"
+                        >
+                            <div class="text-center mb-2 text-gray-600 font-medium">Duración del video</div>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button 
+                                    wire:click="$set('durationSeconds', 4)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 4 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>4 segundos</span>
+                                    <span class="text-xs text-gray-500">Rápido</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('durationSeconds', 6)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 6 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>6 segundos</span>
+                                    <span class="text-xs text-gray-500">Medio</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('durationSeconds', 8)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 8 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>8 segundos</span>
+                                    <span class="text-xs text-gray-500">Largo</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Resolución dropdown - Solo para Veo 3.1 -->
+                    <div x-data="{ open: false }" class="relative">
+                        <button 
+                            @click="open = !open"
+                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                            </svg>
+                            <span>{{ $resolution }}</span>
+                        </button>
+                        <div 
+                            x-show="open" 
+                            x-cloak
+                            @click.away="open = false"
+                            class="absolute bottom-full left-0 mb-1 bg-white border border-gray-200 rounded-xl p-4 w-[180px] z-20 shadow-lg"
+                        >
+                            <div class="text-center mb-2 text-gray-600 font-medium">Resolución</div>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button 
+                                    wire:click="$set('resolution', '720p')"
+                                    @click="open = false"
+                                    class="bg-{{ $resolution === '720p' ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>720p</span>
+                                    <span class="text-xs {{ $resolution === '720p' ? 'text-gray-300' : 'text-gray-500' }}">HD</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('resolution', '1080p')"
+                                    @click="open = false"
+                                    class="bg-{{ $resolution === '1080p' ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>1080p</span>
+                                    <span class="text-xs {{ $resolution === '1080p' ? 'text-gray-300' : 'text-gray-500' }}">Full HD</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Toggle de Audio - Solo para Veo 3.1 -->
+                    <button 
+                        type="button"
+                        wire:click="$toggle('generateAudio')"
+                        class="flex items-center space-x-1 rounded-full px-3 py-1 text-sm shadow-sm transition-colors {{ $generateAudio ? 'bg-black text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-700 hover:bg-gray-200' }}"
+                    >
+                        @if($generateAudio)
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                        </svg>
+                        @else
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" clip-rule="evenodd" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                        </svg>
+                        @endif
+                        <span>{{ $generateAudio ? 'Audio' : 'Sin audio' }}</span>
+                    </button>
+                    @endif
+
+                    <!-- Duración dropdown - Para Kling (5, 10s) -->
+                    @if($model === 'kling')
+                    <div x-data="{ open: false }" class="relative">
+                        <button 
+                            @click="open = !open"
+                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span>{{ $durationSeconds }}s</span>
+                        </button>
+                        <div 
+                            x-show="open" 
+                            x-cloak
+                            @click.away="open = false"
+                            class="absolute bottom-full left-0 mb-1 bg-white border border-gray-200 rounded-xl p-4 w-[200px] z-20 shadow-lg"
+                        >
+                            <div class="text-center mb-2 text-gray-600 font-medium">Duración del video</div>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button 
+                                    wire:click="$set('durationSeconds', 5)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 5 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>5 segundos</span>
+                                    <span class="text-xs text-gray-500">Estándar</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('durationSeconds', 10)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 10 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>10 segundos</span>
+                                    <span class="text-xs text-gray-500">Largo</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    @endif
+
+                    <!-- Duración dropdown - Para modelos Sora (4, 8, 12s) -->
+                    @if(in_array($model, ['sora-2', 'sora-2-pro']))
+                    <div x-data="{ open: false }" class="relative">
+                        <button 
+                            @click="open = !open"
+                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span>{{ $durationSeconds }}s</span>
+                        </button>
+                        <div 
+                            x-show="open" 
+                            x-cloak
+                            @click.away="open = false"
+                            class="absolute bottom-full left-0 mb-1 bg-white border border-gray-200 rounded-xl p-4 w-[200px] z-20 shadow-lg"
+                        >
+                            <div class="text-center mb-2 text-gray-600 font-medium">Duración del video</div>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button 
+                                    wire:click="$set('durationSeconds', 4)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 4 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>4 segundos</span>
+                                    <span class="text-xs text-gray-500">Rápido</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('durationSeconds', 8)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 8 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>8 segundos</span>
+                                    <span class="text-xs text-gray-500">Medio</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('durationSeconds', 12)"
+                                    @click="open = false"
+                                    class="bg-{{ $durationSeconds === 12 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>12 segundos</span>
+                                    <span class="text-xs text-gray-500">Largo</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    @endif
+
+                    <!-- Cantidad dropdown - Solo Veo2 permite 1 o 2 videos -->
+                    @if($model === 'veo2')
+                    <div x-data="{ open: false }" class="relative">
+                        <button 
+                            @click="open = !open"
+                            class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4" />
+                            </svg>
+                            <span>{{ $count }} video{{ $count > 1 ? 's' : '' }}</span>
                         </button>
                         <div 
                             x-show="open" 
@@ -261,25 +471,31 @@
                         >
                             <div class="text-center mb-2 text-gray-600 font-medium">Cantidad de videos</div>
                             <div class="grid grid-cols-1 gap-2">
-                                @foreach($this->getAvailableCountsForModel() as $value => $label)
-                                    <button 
-                                        wire:click="$set('count', {{ $value }})"
-                                        @click="open = false"
-                                        class="bg-{{ $count === $value ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
-                                    >
-                                        <span>{{ $value }}</span>
-                                        <span class="text-xs {{ $count === $value ? 'text-gray-400' : 'text-gray-500' }}">{{ $label }}</span>
-                                    </button>
-                                @endforeach
+                                <button 
+                                    wire:click="$set('count', 1)"
+                                    @click="open = false"
+                                    class="bg-{{ $count === 1 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>1 video</span>
+                                    <span class="text-xs {{ $count === 1 ? 'text-gray-300' : 'text-gray-500' }}">Rápido</span>
+                                </button>
+                                <button 
+                                    wire:click="$set('count', 2)"
+                                    @click="open = false"
+                                    class="bg-{{ $count === 2 ? 'black text-white' : 'gray-100 hover:bg-gray-200 text-gray-800' }} rounded text-center py-2 text-sm flex justify-between items-center px-3"
+                                >
+                                    <span>2 videos</span>
+                                    <span class="text-xs {{ $count === 2 ? 'text-gray-300' : 'text-gray-500' }}">Más opciones</span>
+                                </button>
                             </div>
-                            
                         </div>
                     </div>
+                    @endif
 
                     <!-- Botones de subida de imágenes para modelos que soportan imágenes -->
-                    @if(in_array($model, ['veo2', 'gen4_turbo', 'gen3a_turbo', 'ray2', 'ray2-flash']))
+                    @if(in_array($model, ['veo3.1', 'kling', 'veo2', 'gen4_turbo', 'ray2', 'ray2-flash', 'sora-2', 'sora-2-pro']))
                     <div class="flex items-center gap-2">
-                        <!-- Botón de imagen de inicio (Veo2, Runway, Luma) -->
+                        <!-- Botón de imagen de inicio (Veo2, Runway, Luma, Sora) -->
                         <button type="button" 
                                 onclick="document.getElementById('imageUploadStart').click()" 
                                 class="flex items-center gap-2 bg-{{ !empty($imageFilesStart) ? 'black hover:bg-black text-white' : 'gray-100 hover:bg-gray-200 text-gray-700' }} rounded-full px-3 py-1 text-sm shadow-sm cursor-pointer transition-colors">
@@ -291,10 +507,9 @@
                                 <span class="bg-white text-black text-xs rounded-full w-4 h-4 flex items-center justify-center">✓</span>
                             @endif
                         </button>
-                        <input id="imageUploadStart" type="file" class="hidden" wire:model.live="temporaryImagesStart" accept="image/*">
                         
-                        <!-- Botón de imagen de fin (para Gen3 y Luma) -->
-                        @if(in_array($model, ['gen3a_turbo', 'ray2', 'ray2-flash']))
+                        <!-- Botón de imagen de fin (para Gen3, Luma y Veo 3.1) -->
+                        @if(in_array($model, ['veo3.1', 'ray2', 'ray2-flash']))
                         <button type="button" 
                                 onclick="document.getElementById('imageUploadEnd').click()" 
                                 class="flex items-center gap-2 bg-{{ !empty($imageFilesEnd) ? 'black hover:bg-black text-white' : 'gray-100 hover:bg-gray-200 text-gray-700' }} rounded-full px-3 py-1 text-sm shadow-sm cursor-pointer transition-colors">
@@ -306,9 +521,11 @@
                                 <span class="bg-white text-black text-xs rounded-full w-4 h-4 flex items-center justify-center">✓</span>
                             @endif
                         </button>
-                        <input id="imageUploadEnd" type="file" class="hidden" wire:model.live="temporaryImagesEnd" accept="image/*">
                         @endif
                     </div>
+                    <!-- ✅ INPUTS OCULTOS FUERA de los condicionales para evitar problemas de re-render -->
+                    <input id="imageUploadStart" type="file" class="hidden" wire:model.live="temporaryImagesStart" accept="image/*">
+                    <input id="imageUploadEnd" type="file" class="hidden" wire:model.live="temporaryImagesEnd" accept="image/*">
                     @endif
                 </div>
 

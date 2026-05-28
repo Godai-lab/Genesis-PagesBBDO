@@ -2,13 +2,19 @@
 
 namespace App\Livewire\Generador\Herramientas;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use Illuminate\Support\Facades\Storage;
 use Livewire\Attributes\Validate;
+use Livewire\Attributes\Reactive;
 use Livewire\Component;
 use Livewire\Attributes\On;
 use Livewire\WithFileUploads;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
 use App\Services\GeminiService;
+use App\Services\Replicate\GoogleService;
+use App\Services\Replicate\KwaivgiService;
+use App\Supports\CostCalculationService;
 
 /**
  * Generador de Videos
@@ -19,6 +25,13 @@ use App\Services\GeminiService;
 class VideoGenerator extends Component
 {
     use WithFileUploads;
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Generador de Videos';
+
+    /** ✅ Account ID recibido del componente padre - Reactive para sincronizar automáticamente */
+    #[Reactive]
+    public ?int $accountId = null;
 
     /** Texto del prompt */
     public string $promptText = '';
@@ -29,10 +42,22 @@ class VideoGenerator extends Component
     /** Relación de aspecto - se inicializará en mount() */
     public string $ratio = '16:9';
     public bool $isGenerating = false;
+    
+    /** Indica si el ratio está bloqueado por una imagen subida */
+    public bool $ratioLocked = false;
 
-    /** Cantidad de videos a generar */
+    /** Cantidad de videos a generar (Veo2 permite 1 o 2, otros modelos solo 1) */
     #[Validate('integer|min:1|max:2')]
     public int $count = 1;
+    
+    /** Duración del video en segundos (para Sora, Veo 3.1, Kling) */
+    public int $durationSeconds = 4;
+    
+    /** Resolución del video (solo para Veo 3.1 Replicate) */
+    public string $resolution = '1080p';
+    
+    /** Generar audio con el video (solo para Veo 3.1 Replicate) */
+    public bool $generateAudio = true;
 
     /** Resultados generados recientemente */
     public array $results = [];
@@ -40,6 +65,12 @@ class VideoGenerator extends Component
     /** Imágenes de inicio y fin para modelos que las requieren */
     public $imageFilesStart = [];
     public $imageFilesEnd = [];
+    
+    /** 
+     * Imágenes temporales para subida
+     * La validación de tamaño (5MB máx) se hace manualmente en updated*()
+     * porque estas propiedades son arrays, no archivos individuales
+     */
     public $temporaryImagesStart = [];
     public $temporaryImagesEnd = [];
 
@@ -54,6 +85,15 @@ class VideoGenerator extends Component
 
     /** Catálogo de modelos disponibles con información detallada */
     public array $availableModels = [
+        'veo3.1' => [
+            'name' => 'Veo 3.1',
+            'price' => '$0.15',
+            'priceUnit' => 'por segundo',
+            'description' => 'Última versión de Google con audio nativo, imagen inicio/fin',
+            'bestFor' => 'Videos profesionales con audio, transiciones entre imágenes',
+            'speed' => 'Medio',
+            'quality' => 'Excepcional'
+        ],
         'veo2' => [
             'name' => 'Veo2',
             'price' => '$0.12',
@@ -63,6 +103,15 @@ class VideoGenerator extends Component
             'speed' => 'Rápido',
             'quality' => 'Excelente'
         ],
+        'kling' => [
+            'name' => 'Kling v2.5 Turbo Pro',
+            'price' => '$0.07',
+            'priceUnit' => 'por segundo',
+            'description' => 'Modelo avanzado con movimiento suave y adherencia al prompt',
+            'bestFor' => 'Videos cinematográficos, contenido creativo de alta calidad',
+            'speed' => 'Medio',
+            'quality' => 'Excepcional'
+        ],
         'gen4_turbo' => [
             'name' => 'Gen4-Turbo', 
             'price' => '$0.08',
@@ -70,15 +119,6 @@ class VideoGenerator extends Component
             'description' => 'Modelo equilibrado entre calidad y costo',
             'bestFor' => 'Uso general, prototipos, contenido web',
             'speed' => 'Muy rápido',
-            'quality' => 'Buena'
-        ],
-        'gen3a_turbo' => [
-            'name' => 'Gen3-AlphaTurbo',
-            'price' => '$0.06',
-            'priceUnit' => 'por segundo',
-            'description' => 'Modelo AlphaTurbo de alta velocidad',
-            'bestFor' => 'Contenido rápido, prototipos, pruebas',
-            'speed' => 'Ultra rápido',
             'quality' => 'Buena'
         ],
         'ray2' => [
@@ -98,6 +138,24 @@ class VideoGenerator extends Component
             'bestFor' => 'Contenido rápido, prototipos',
             'speed' => 'Rápido',
             'quality' => 'Buena'
+        ],
+        'sora-2' => [
+            'name' => 'Sora 2',
+            'price' => '$0.15',
+            'priceUnit' => 'por segundo',
+            'description' => 'Modelo Sora de OpenAI de última generación',
+            'bestFor' => 'Videos de alta calidad, realismo extremo',
+            'speed' => 'Medio',
+            'quality' => 'Excelente'
+        ],
+        'sora-2-pro' => [
+            'name' => 'Sora 2 Pro',
+            'price' => '$0.20',
+            'priceUnit' => 'por segundo',
+            'description' => 'Versión Pro de Sora con máxima calidad',
+            'bestFor' => 'Producciones profesionales, máxima fidelidad',
+            'speed' => 'Medio-Lento',
+            'quality' => 'Excepcional'
         ]
     ];
 
@@ -117,12 +175,26 @@ class VideoGenerator extends Component
     public function getAvailableRatiosForModel(): array
     {
         switch ($this->model) {
-            case 'veo2':
-                // ✅ Veo2 (Google): 3 ratios disponibles
+            case 'veo3.1':
+                // ✅ Veo 3.1 (Google): 2 ratios disponibles
                 return [
                     '16:9' => 'Panorámico',
                     '9:16' => 'Vertical móvil',
-                    
+                ];
+                
+            case 'kling':
+                // ✅ Kling (Kwaivgi): 3 ratios disponibles
+                return [
+                    '16:9' => 'Panorámico',
+                    '9:16' => 'Vertical móvil',
+                    '1:1' => 'Cuadrado',
+                ];
+                
+            case 'veo2':
+                // ✅ Veo2 (Google): 2 ratios disponibles
+                return [
+                    '16:9' => 'Panorámico',
+                    '9:16' => 'Vertical móvil',
                 ];
                 
             case 'gen4_turbo':
@@ -136,58 +208,23 @@ class VideoGenerator extends Component
                     '21:9' => 'Ultra panorámico'
                 ];
                 
-            case 'gen3a_turbo':
-                // ✅ Gen3-AlphaTurbo (Runway): Solo 2 ratios disponibles
-                return [
-                    '16:9' => 'Panorámico',
-                    '9:16' => 'Vertical móvil'
-                ];
-                
             case 'ray2':
             case 'ray2-flash':
                 // ✅ Ray2 y Ray2-Flash (Luma): Todos los ratios disponibles
                 return $this->availableRatios;
                 
+            case 'sora-2':
+            case 'sora-2-pro':
+                
+                return [
+                    '16:9' => 'Panorámico',
+                    '9:16' => 'Vertical móvil'
+                ];
+                
             default:
                 // Fallback: todos los ratios para modelos no reconocidos
                 return $this->availableRatios;
         }
-    }
-
-    /**
-     * Obtiene las cantidades disponibles según el modelo seleccionado
-     * 
-     * @return array Array asociativo [valor => descripción]
-     */
-    public function getAvailableCountsForModel(): array
-    {
-        switch ($this->model) {
-            case 'veo2':
-                // ✅ Veo2 (Gemini): Soporta 1 o 2 videos
-                return [
-                    1 => 'Un video',
-                    2 => 'Dos videos'
-                ];
-                
-            case 'gen4_turbo':
-            case 'gen3a_turbo':
-            case 'ray2':
-            case 'ray2-flash':
-            default:
-                // ✅ Otros modelos: Solo 1 video por ahora
-                return [
-                    1 => 'Un video'
-                ];
-        }
-    }
-
-    /**
-     * Obtiene el valor máximo de count permitido para el modelo actual
-     */
-    public function getMaxCountForModel(): int
-    {
-        $availableCounts = $this->getAvailableCountsForModel();
-        return max(array_keys($availableCounts));
     }
 
     /**
@@ -217,11 +254,46 @@ class VideoGenerator extends Component
             'currentModel' => $this->model
         ]);
         
+        // ✅ Resetear count a 1 si el modelo no es veo2 (solo veo2 permite 2 videos)
+        if ($key !== 'veo2' && $this->count > 1) {
+            $this->count = 1;
+            Log::info('📊 Count reseteado a 1 (modelo no soporta múltiples videos)', [
+                'model' => $key
+            ]);
+        }
+        
+        // ✅ Ajustar duración por defecto según el modelo
+        if ($key === 'kling') {
+            // Kling: 5 o 10 segundos
+            if (!in_array($this->durationSeconds, [5, 10])) {
+                $this->durationSeconds = 5;
+            }
+        } elseif ($key === 'veo3.1') {
+            // Veo 3.1: 4, 6 u 8 segundos
+            if (!in_array($this->durationSeconds, [4, 6, 8])) {
+                $this->durationSeconds = 8;
+            }
+        } elseif (in_array($key, ['sora-2', 'sora-2-pro'])) {
+            // Sora: 4, 8 o 12 segundos
+            if (!in_array($this->durationSeconds, [4, 8, 12])) {
+                $this->durationSeconds = 4;
+            }
+        }
+        
         // ✅ Validar que el ratio actual sea compatible con el nuevo modelo
         $this->validarRatioCompatible();
         
-        // ✅ Validar que el count actual sea compatible con el nuevo modelo
-        $this->validarCountCompatible();
+        // ✅ VALIDAR IMAGEN si hay una cargada (para cualquier modelo)
+        if ($this->tieneImagenCargada()) {
+            Log::info('🔍 Modelo cambiado con imagen cargada - Validando imagen', [
+                'model' => $key,
+                'hasImageFilesStart' => !empty($this->imageFilesStart),
+                'fromHistory' => $this->fromHistory,
+                'hasImageUrl' => !empty($this->imageUrl)
+            ]);
+            
+            $this->validarImagenParaModelo();
+        }
     }
 
     /**
@@ -283,12 +355,16 @@ class VideoGenerator extends Component
             // Dispatch el mismo evento que las imágenes subidas para compatibilidad
             $this->dispatch('imageLoadedForVideo', url: $this->imageUrl);
             
+            // 🎯 Validar imagen del historial según el modelo seleccionado
+            $this->validarImagenParaModelo();
+            
             Log::info('✅ Imagen del historial cargada exitosamente para video', [
                 'finalImageUrl' => $this->imageUrl,
                 'fromHistory' => $this->fromHistory,
                 'finalRatio' => $this->ratio,
                 'currentModel' => $this->model,
-                'hasPrompt' => !empty(trim($this->promptText))
+                'hasPrompt' => !empty(trim($this->promptText)),
+                'ratioLocked' => $this->ratioLocked
             ]);
             
         } catch (\Exception $e) {
@@ -329,31 +405,249 @@ class VideoGenerator extends Component
             $this->addError('ratio', "El ratio seleccionado no es compatible con {$this->getModelDisplayName($this->model)}. Se cambió automáticamente a {$ratiosDisponibles[$nuevoRatio]}.");
         }
     }
+    
+    /**
+     * Verifica si hay una imagen cargada (subida o del historial)
+     */
+    private function tieneImagenCargada(): bool
+    {
+        return !empty($this->imageFilesStart) || ($this->fromHistory && !empty($this->imageUrl));
+    }
+    
+    /**
+     * Valida la imagen cargada según el modelo seleccionado
+     * Se ejecuta cuando se cambia de modelo y ya hay una imagen
+     * 
+     * 🎯 ESTRUCTURA MODULAR PARA FUTURAS VALIDACIONES:
+     * - Cada modelo puede tener sus propias reglas de validación
+     * - Fácil agregar nuevos modelos con validaciones específicas
+     * - Separación clara de responsabilidades
+     */
+    private function validarImagenParaModelo(): void
+    {
+        switch ($this->model) {
+            case 'sora-2':
+            case 'sora-2-pro':
+                // ✅ Sora: Validación estricta de tamaños exactos (1280x720, 720x1280)
+                $this->validarImagenParaSora();
+                break;
+                
+            case 'veo3.1':
+            case 'kling':
+                // ✅ Veo 3.1 y Kling: Validación básica (sin restricciones de tamaño, igual que Veo2)
+                $this->validarImagenBasica();
+                break;
+                
+            case 'veo2':
+                // ✅ Veo2: Validación básica (sin restricciones de tamaño)
+                $this->validarImagenBasica();
+                break;
+                
+            case 'gen4_turbo':
+                // ✅ Runway: Validación básica (sin restricciones de tamaño)
+                $this->validarImagenBasica();
+                break;
+                
+            case 'ray2':
+            case 'ray2-flash':
+                // ✅ Luma: Validación básica (sin restricciones de tamaño)
+                $this->validarImagenBasica();
+                break;
+                
+            // 🚀 FUTURAS VALIDACIONES - Ejemplos de cómo agregar nuevos modelos:
+            // case 'nuevo-modelo':
+            //     $this->validarImagenParaNuevoModelo();
+            //     break;
+                
+            default:
+                // ✅ Modelos no reconocidos: Validación básica
+                $this->validarImagenBasica();
+                break;
+        }
+    }
 
     /**
-     * Valida que el count seleccionado sea compatible con el modelo actual
+     * Validación básica de imagen para modelos que no requieren restricciones especiales
+     * (Veo2, Runway, Luma, etc.)
+     * 
+     * 🎯 EJEMPLO DE CÓMO AGREGAR VALIDACIONES ESPECÍFICAS:
+     * 
+     * private function validarImagenParaNuevoModelo(): void
+     * {
+     *     // 1. Obtener dimensiones de la imagen
+     *     $imagePath = $this->obtenerPathImagen();
+     *     $imageInfo = getimagesize($imagePath);
+     *     $width = $imageInfo[0];
+     *     $height = $imageInfo[1];
+     *     
+     *     // 2. Aplicar reglas específicas del modelo
+     *     $tamañosPermitidos = ['1024x1024', '512x512'];
+     *     $sizeString = "{$width}x{$height}";
+     *     
+     *     if (!in_array($sizeString, $tamañosPermitidos)) {
+     *         // 3. Manejar error o redimensionar
+     *         $this->manejarErrorImagenIncompatible($sizeString, $tamañosPermitidos);
+     *         return;
+     *     }
+     *     
+     *     // 4. Bloquear ratio si es necesario
+     *     $this->ratioLocked = true;
+     *     $this->ratio = $this->detectarRatio($width, $height);
+     * }
      */
-    private function validarCountCompatible(): void
+    private function validarImagenBasica(): void
     {
-        $countsDisponibles = $this->getAvailableCountsForModel();
-        
-        if (!array_key_exists($this->count, $countsDisponibles)) {
-            // ❌ Count no compatible, cambiar al primer count disponible
-            $nuevoCount = (int) array_key_first($countsDisponibles);
-            $countAnterior = $this->count;
-            $this->count = $nuevoCount;
-            
-            Log::info("⚠️ Count cambiado automáticamente", [
-                'countAnterior' => $countAnterior,
-                'nuevoCount' => $nuevoCount,
-                'modelo' => $this->model,
-                'razon' => 'Count no compatible con el modelo seleccionado'
+        try {
+            Log::info('📷 Validación básica de imagen', [
+                'model' => $this->model,
+                'fromHistory' => $this->fromHistory,
+                'hasImageFilesStart' => !empty($this->imageFilesStart),
+                'hasImageUrl' => !empty($this->imageUrl)
             ]);
             
-            // Notificar al usuario si se redujo de 2 a 1
-            if ($countAnterior > $nuevoCount) {
-                $this->addError('count', "El modelo {$this->getModelDisplayName($this->model)} solo soporta {$countsDisponibles[$nuevoCount]}. Se ajustó automáticamente.");
+            // ✅ Para modelos no-Sora: Solo verificar que la imagen existe y es válida
+            // No hay restricciones de tamaño específicas
+            
+            if ($this->fromHistory && $this->imageUrl) {
+                Log::info('✅ Imagen del historial válida para modelo no-Sora', [
+                    'model' => $this->model,
+                    'imageUrl' => $this->imageUrl
+                ]);
+            } elseif (!empty($this->imageFilesStart)) {
+                Log::info('✅ Imagen subida válida para modelo no-Sora', [
+                    'model' => $this->model,
+                    'count' => count($this->imageFilesStart)
+                ]);
             }
+            
+            // ✅ No bloquear el ratio para modelos no-Sora
+            $this->ratioLocked = false;
+            
+            Log::info('✅ Validación básica completada', [
+                'model' => $this->model,
+                'ratioLocked' => $this->ratioLocked
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error en validación básica de imagen', [
+                'model' => $this->model,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Valida la imagen cargada para modelos Sora
+     * Se ejecuta cuando se cambia a modelo Sora y ya hay una imagen
+     * SOLO acepta tamaños exactos: 720x1280 (Portrait) o 1280x720 (Landscape)
+     */
+    private function validarImagenParaSora(): void
+    {
+        try {
+            $imagePath = null;
+            
+            // Obtener el path de la imagen
+            if ($this->fromHistory && $this->imageUrl) {
+                // Descargar temporalmente para obtener dimensiones
+                $imageContent = @file_get_contents($this->imageUrl);
+                if ($imageContent) {
+                    $tempPath = sys_get_temp_dir() . '/' . uniqid('ratio_detect_') . '.jpg';
+                    file_put_contents($tempPath, $imageContent);
+                    $imagePath = $tempPath;
+                }
+            } elseif (!empty($this->imageFilesStart)) {
+                $imagePath = $this->imageFilesStart[0]->getRealPath();
+            }
+            
+            if (!$imagePath || !file_exists($imagePath)) {
+                Log::warning('⚠️ No se pudo obtener el path de la imagen para validar');
+                return;
+            }
+            
+            // Obtener dimensiones
+            $imageInfo = @getimagesize($imagePath);
+            
+            // Limpiar archivo temporal si se creó
+            if ($this->fromHistory && isset($tempPath) && file_exists($tempPath)) {
+                @unlink($tempPath);
+            }
+            
+            if (!$imageInfo) {
+                Log::warning('⚠️ No se pudieron obtener las dimensiones de la imagen');
+                return;
+            }
+            
+            $width = $imageInfo[0];
+            $height = $imageInfo[1];
+            
+            Log::info('📐 Validando imagen para Sora con tamaños exactos', [
+                'width' => $width,
+                'height' => $height,
+                'sizeString' => "{$width}x{$height}",
+                'model' => $this->model
+            ]);
+            
+            // ✅ VALIDAR que el tamaño sea EXACTAMENTE uno de los permitidos por OpenAI
+            $tamañosPermitidos = [
+                '1280x720' => '16:9',  // Horizontal
+                '720x1280' => '9:16',  // Vertical
+            ];
+            
+            $sizeString = "{$width}x{$height}";
+            
+            if (!array_key_exists($sizeString, $tamañosPermitidos)) {
+                // ❌ Tamaño NO permitido - RECHAZAR con mensaje claro
+                $errorMessage = "Imagen incompatible con Sora-2. " .
+                    "Debe tener un tamaño EXACTO de: " .
+                    "720×1280 (vertical) " .
+                    "1280×720 (horizontal) " .
+                    "Tu imagen es {$width}×{$height}. " .
+                    "Por favor, redimensiona la imagen a uno de estos tamaños exactos o cambia a otro modelo.";
+                
+                // Limpiar la imagen cargada
+                $this->limpiarTodasLasImagenes();
+                
+                // Mostrar error al usuario
+                $this->addError('imageFilesStart', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'validation', 
+                    tool: 'video-generator'
+                );
+                
+                Log::warning('⚠️ Imagen rechazada por Sora - tamaño incorrecto', [
+                    'width' => $width,
+                    'height' => $height,
+                    'sizeString' => $sizeString,
+                    'tamañosPermitidos' => array_keys($tamañosPermitidos),
+                    'model' => $this->model
+                ]);
+                
+                return;
+            }
+            
+            // ✅ Tamaño válido - Bloquear y establecer el ratio (solo para Sora-2)
+            $ratioDetectado = $tamañosPermitidos[$sizeString];
+            $this->ratio = $ratioDetectado;
+            
+            // Solo bloquear el ratio si el modelo actual es Sora-2
+            if (in_array($this->model, ['sora-2', 'sora-2-pro'])) {
+                $this->ratioLocked = true;
+            }
+            
+            Log::info('🔒 Imagen Sora validada exitosamente - ratio bloqueado', [
+                'size' => $sizeString,
+                'ratio' => $ratioDetectado,
+                'modelo' => $this->model,
+                'ratioLocked' => $this->ratioLocked,
+                'tipo' => $width > $height ? 'Landscape' : 'Portrait'
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error validando imagen existente para Sora', [
+                'error' => $e->getMessage()
+            ]);
         }
     }
 
@@ -370,7 +664,30 @@ class VideoGenerator extends Component
         $hasErrors = false;
         $errorMessage = '';
         
-        if ($this->model === 'veo2') {
+        if ($this->model === 'veo3.1' || $this->model === 'kling') {
+            // ✅ Veo 3.1 y Kling: Requieren prompt obligatorio (igual que Veo2)
+            $modelName = $this->getModelDisplayName($this->model);
+            Log::info('🔍 Validando ' . $modelName, [
+                'model' => $this->model,
+                'promptLength' => strlen(trim($this->promptText)),
+                'hasImageFilesStart' => !empty($this->imageFilesStart),
+                'fromHistory' => $this->fromHistory,
+                'hasImageUrl' => !empty($this->imageUrl)
+            ]);
+            
+            if (empty(trim($this->promptText))) {
+                $errorMessage = "Para {$modelName} es necesario escribir un prompt que describa el video a generar.";
+                $this->addError('promptText', $errorMessage);
+                $hasErrors = true;
+                
+                Log::info("❌ Validación {$modelName}: Prompt requerido", [
+                    'model' => $this->model,
+                    'promptLength' => strlen(trim($this->promptText))
+                ]);
+            } else {
+                Log::info("✅ Validación {$modelName}: Prompt válido");
+            }
+        } elseif ($this->model === 'veo2') {
             // ✅ Veo2: Requiere prompt obligatorio
             Log::info('🔍 Validando Veo2', [
                 'model' => $this->model,
@@ -394,7 +711,7 @@ class VideoGenerator extends Component
             } else {
                 Log::info('✅ Validación Veo2: Prompt válido');
             }
-        } elseif (in_array($this->model, ['gen4_turbo', 'gen3a_turbo'])) {
+        } elseif ($this->model === 'gen4_turbo') {
             // ✅ Runway: Requiere al menos una imagen (inicio o fin)
             $hasStartImages = !empty($this->imageFilesStart);
             $hasEndImages = !empty($this->imageFilesEnd);
@@ -432,6 +749,30 @@ class VideoGenerator extends Component
                     'hasEndImages' => $hasEndImages,
                     'hasHistoryImage' => $hasHistoryImage,
                     'hasAnyImage' => $hasAnyImage
+                ]);
+            }
+        } elseif (in_array($this->model, ['sora-2', 'sora-2-pro'])) {
+            // ✅ Sora: Requiere prompt obligatorio, imagen es opcional
+            Log::info('🔍 Validando Sora', [
+                'model' => $this->model,
+                'promptLength' => strlen(trim($this->promptText)),
+                'hasImageFilesStart' => !empty($this->imageFilesStart),
+                'fromHistory' => $this->fromHistory,
+                'hasImageUrl' => !empty($this->imageUrl)
+            ]);
+            
+            if (empty(trim($this->promptText))) {
+                $errorMessage = 'Para modelos Sora es necesario escribir un prompt que describa el video a generar.';
+                $this->addError('promptText', $errorMessage);
+                $hasErrors = true;
+                
+                Log::info('❌ Validación Sora: Prompt requerido', [
+                    'model' => $this->model,
+                    'promptLength' => strlen(trim($this->promptText))
+                ]);
+            } else {
+                Log::info('✅ Validación Sora: Prompt válido', [
+                    'withImage' => !empty($this->imageFilesStart) || ($this->fromHistory && $this->imageUrl)
                 ]);
             }
         } else {
@@ -485,6 +826,7 @@ class VideoGenerator extends Component
             'model' => $this->model,
             'ratio' => $this->ratio,
             'ratiosDisponibles' => array_keys($ratiosDisponibles),
+            'accountId' => $this->accountId,
             'fromHistory' => $this->fromHistory,
             'hasImageUrl' => !empty($this->imageUrl)
         ]);
@@ -493,6 +835,19 @@ class VideoGenerator extends Component
         $this->dispatch('videoGeneratorMounted');
         
         Log::info('✅ VideoGenerator montado exitosamente');
+    }
+
+    /**
+     * ✅ NUEVO: Listener para actualizar cuenta cuando cambia en el padre
+     */
+    #[On('accountChanged')]
+    public function updateAccount(?int $accountId): void
+    {
+        $this->accountId = $accountId;
+        
+        Log::info('🔄 Cuenta actualizada en VideoGenerator', [
+            'accountId' => $accountId
+        ]);
     }
 
     /**
@@ -581,15 +936,142 @@ class VideoGenerator extends Component
         $this->historyMetadata = [];
         $this->imageUrl = null;
         
+        // 🔓 Desbloquear el ratio cuando se limpian las imágenes
+        $this->ratioLocked = false;
+        
         Log::info('🗑️ Todas las imágenes limpiadas del VideoGenerator');
     }
 
+    /**
+     * Valida que la imagen tenga el tamaño EXACTO requerido por Sora
+     * OpenAI NO acepta redimensionamiento, debe ser exactamente 1280x720 o 720x1280
+     */
+    private function detectarYBloquearRatioPorImagen(): void
+    {
+        try {
+            $imagePath = null;
+            
+            // Obtener el path de la imagen
+            if ($this->fromHistory && $this->imageUrl) {
+                // Descargar temporalmente para obtener dimensiones
+                $imageContent = @file_get_contents($this->imageUrl);
+                if ($imageContent) {
+                    $tempPath = sys_get_temp_dir() . '/' . uniqid('ratio_detect_') . '.jpg';
+                    file_put_contents($tempPath, $imageContent);
+                    $imagePath = $tempPath;
+                }
+            } elseif (!empty($this->imageFilesStart)) {
+                $imagePath = $this->imageFilesStart[0]->getRealPath();
+            }
+            
+            if (!$imagePath || !file_exists($imagePath)) {
+                Log::warning('⚠️ No se pudo obtener el path de la imagen para detectar dimensiones');
+                return;
+            }
+            
+            // Obtener dimensiones
+            $imageInfo = @getimagesize($imagePath);
+            
+            // Limpiar archivo temporal si se creó
+            if ($this->fromHistory && isset($tempPath) && file_exists($tempPath)) {
+                @unlink($tempPath);
+            }
+            
+            if (!$imageInfo) {
+                Log::warning('⚠️ No se pudieron obtener las dimensiones de la imagen');
+                return;
+            }
+            
+            $width = $imageInfo[0];
+            $height = $imageInfo[1];
+            
+            Log::info('📐 Dimensiones de imagen detectadas', [
+                'width' => $width,
+                'height' => $height,
+                'sizeString' => "{$width}x{$height}"
+            ]);
+            
+            // ✅ VALIDAR que el tamaño sea EXACTAMENTE uno de los permitidos por OpenAI
+            $tamañosPermitidos = [
+                '1280x720' => '16:9',  // Horizontal
+                '720x1280' => '9:16',  // Vertical
+            ];
+            
+            $sizeString = "{$width}x{$height}";
+            
+            if (!array_key_exists($sizeString, $tamañosPermitidos)) {
+                // ❌ Tamaño NO permitido - RECHAZAR
+                $errorMessage = "La imagen debe tener un tamaño exacto de 1280x720 (horizontal) o 720x1280 (vertical). Tu imagen es {$width}x{$height}.";
+                
+                // Limpiar la imagen subida
+                $this->limpiarTodasLasImagenes();
+                
+                // Mostrar error al usuario
+                $this->addError('imageFilesStart', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'validation', 
+                    tool: 'video-generator'
+                );
+                
+                Log::warning('⚠️ Imagen rechazada por tamaño incorrecto', [
+                    'width' => $width,
+                    'height' => $height,
+                    'sizeString' => $sizeString,
+                    'tamañosPermitidos' => array_keys($tamañosPermitidos)
+                ]);
+                
+                return;
+            }
+            
+            // ✅ Tamaño válido - Bloquear y establecer el ratio (solo para Sora-2)
+            $ratioDetectado = $tamañosPermitidos[$sizeString];
+            $this->ratio = $ratioDetectado;
+            
+            // Solo bloquear el ratio si el modelo actual es Sora-2
+            if (in_array($this->model, ['sora-2', 'sora-2-pro'])) {
+                $this->ratioLocked = true;
+            }
+            
+            Log::info('🔒 Imagen aceptada con tamaño exacto', [
+                'size' => $sizeString,
+                'ratio' => $ratioDetectado,
+                'modelo' => $this->model,
+                'ratioLocked' => $this->ratioLocked
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error validando tamaño de imagen', [
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+    
     /**
      * Actualizar imagen de inicio cuando se sube temporalmente
      */
     public function updatedTemporaryImagesStart()
     {
         if (!empty($this->temporaryImagesStart)) {
+            // ✅ Validar tamaño del archivo (máx 5MB = 5242880 bytes)
+            $file = is_array($this->temporaryImagesStart) ? $this->temporaryImagesStart[0] : $this->temporaryImagesStart;
+            $maxSize = 5 * 1024 * 1024; // 5MB en bytes
+            
+            if ($file->getSize() > $maxSize) {
+                $sizeMB = round($file->getSize() / 1024 / 1024, 2);
+                $this->temporaryImagesStart = [];
+                $this->dispatch('addErrorToList', 
+                    message: "⚠️ La imagen de inicio pesa {$sizeMB}MB. Máximo 5MB permitido.", 
+                    type: 'validation', 
+                    tool: 'video-generator'
+                );
+                Log::warning('❌ Imagen de INICIO rechazada por tamaño', [
+                    'size' => $sizeMB . 'MB',
+                    'maxAllowed' => '5MB'
+                ]);
+                return;
+            }
             // 🔄 LIMPIAR IMAGEN DEL HISTORIAL si se suben imágenes manualmente
             if ($this->fromHistory) {
                 Log::info('🧹 Limpiando imagen del historial al subir imagen manual de inicio');
@@ -599,17 +1081,48 @@ class VideoGenerator extends Component
             }
             
             Log::info("Actualizando imagen de inicio: " . count($this->temporaryImagesStart) . " archivos");
+            
+            // ✅ Para modelos NO-Sora: Solo validación básica (sin restricciones de ratio)
+            // Los modelos Veo2, Runway, Luma no requieren validación de aspect ratio
+            
             $this->imageFilesStart = $this->temporaryImagesStart;
             $this->temporaryImagesStart = [];
+            
+            Log::info('✅ Imagen validada correctamente', [
+                'ratio' => $this->ratio,
+                'count' => count($this->imageFilesStart)
+            ]);
+            
+            // 🎯 Validar imagen según el modelo seleccionado
+            $this->validarImagenParaModelo();
         }
     }
 
     /**
      * Actualizar imagen de fin cuando se sube temporalmente
+     * ✅ Funciona para: Luma (ray2) y Veo 3.1 (lastFrame)
      */
     public function updatedTemporaryImagesEnd()
     {
         if (!empty($this->temporaryImagesEnd)) {
+            // ✅ Validar tamaño del archivo (máx 5MB = 5242880 bytes)
+            $file = is_array($this->temporaryImagesEnd) ? $this->temporaryImagesEnd[0] : $this->temporaryImagesEnd;
+            $maxSize = 5 * 1024 * 1024; // 5MB en bytes
+            
+            if ($file->getSize() > $maxSize) {
+                $sizeMB = round($file->getSize() / 1024 / 1024, 2);
+                $this->temporaryImagesEnd = [];
+                $this->dispatch('addErrorToList', 
+                    message: "⚠️ La imagen de fin pesa {$sizeMB}MB. Máximo 5MB permitido.", 
+                    type: 'validation', 
+                    tool: 'video-generator'
+                );
+                Log::warning('❌ Imagen de FIN rechazada por tamaño', [
+                    'size' => $sizeMB . 'MB',
+                    'maxAllowed' => '5MB'
+                ]);
+                return;
+            }
             // 🔄 LIMPIAR IMAGEN DEL HISTORIAL si se suben imágenes manualmente
             if ($this->fromHistory) {
                 Log::info('🧹 Limpiando imagen del historial al subir imagen manual de fin');
@@ -618,9 +1131,19 @@ class VideoGenerator extends Component
                 $this->imageUrl = null;
             }
             
-            Log::info("Actualizando imagen de fin: " . count($this->temporaryImagesEnd) . " archivos");
+            Log::info("📷 Actualizando imagen de FIN", [
+                'model' => $this->model,
+                'count' => count($this->temporaryImagesEnd),
+                'fileName' => $this->temporaryImagesEnd[0]->getClientOriginalName() ?? 'unknown'
+            ]);
+            
             $this->imageFilesEnd = $this->temporaryImagesEnd;
             $this->temporaryImagesEnd = [];
+            
+            Log::info('✅ Imagen de FIN cargada correctamente', [
+                'model' => $this->model,
+                'hasImageFilesEnd' => !empty($this->imageFilesEnd)
+            ]);
         }
     }
     
@@ -641,8 +1164,7 @@ class VideoGenerator extends Component
         if (!$this->validarPorModelo()) {
             Log::warning('❌ Validación fallida, no se inicia generación');
             return; // No continuar si hay errores de validación
-        }
-        
+        }        
         Log::info('✅ Validación exitosa, iniciando generación');
         
         // 1. ACTIVAR INMEDIATAMENTE el spinner
@@ -681,17 +1203,38 @@ class VideoGenerator extends Component
                 ]
             ]);
             
+            // ✅ Validar que haya una cuenta seleccionada
+            if (!$this->accountId) {
+                $errorMessage = 'Debes seleccionar una cuenta antes de generar videos';
+                $this->addError('promptText', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'validation', 
+                    tool: 'video-generator'
+                );
+                
+                $this->dispatch('generationError');
+                $this->isGenerating = false;
+                return;
+            }
+            
+            // ✅ Validar límite de créditos usando la cuenta del componente
+            $this->validateCreditLimit($this->accountId);
         
             // dd($data);
             switch ($data['model']) {
+                case 'veo3.1':
+                    $this->generarConVeo31($data);
+                    break;
+                case 'kling':
+                    $this->generarConKling($data);
+                    break;
                 case 'veo2':
                     $this->generarConVeo2($data);
                     break;
                 case 'gen4_turbo':
                     $this->generarConGen4Turbo($data);
-                    break;
-                case 'gen3a_turbo':
-                    $this->generarConGen3AlphaTurbo($data);
                     break;
                 case 'ray2':
                     $this->generarConRay2($data);
@@ -699,12 +1242,39 @@ class VideoGenerator extends Component
                 case 'ray2-flash':
                     $this->generarConRay2Flash($data);
                     break;
+                case 'sora-2':
+                case 'sora-2-pro':
+                    $this->generarConSora($data);
+                    break;
                 default:
                     throw new \Exception('Modelo no soportado');
             }
 
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            Log::warning('Límite de créditos excedido en Generador de Videos', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null
+            ]);
+            
+            $this->addError('promptText', $e->getMessage());
+            
+            // Enviar error al componente principal
+            $this->dispatch('addErrorToList', 
+                message: $e->getMessage(), 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+            $this->isGenerating = false;
         } catch (\Exception $e) {
-            $errorMessage = 'Error: ' . $e->getMessage();
+            Log::error('Error en Generador de Videos', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null,
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            $errorMessage = 'Ha ocurrido un error al generar el video. Por favor, intenta nuevamente.';
             $this->addError('promptText', $errorMessage);
             
             // Enviar error al componente principal
@@ -715,7 +1285,217 @@ class VideoGenerator extends Component
             );
             
             $this->dispatch('videoGenerationError');
-            $this->isGenerating = false; // Solo en caso de error
+            $this->isGenerating = false;
+        }
+    }
+
+    /**
+     * ========================================================================
+     * MÉTODO PARA VEO 3.1 (via REPLICATE)
+     * ========================================================================
+     * 
+     * Veo 3.1 ahora usa ReplicateService en lugar de Gemini porque:
+     * - Replicate soporta last_frame (imagen de fin) 
+     * - Replicate acepta URLs de imágenes (subimos a S3 primero)
+     * - Replicate tiene audio nativo y múltiples resoluciones
+     * - El endpoint de Gemini API no soporta lastFrame (solo Vertex AI)
+     * 
+     * Parámetros de Replicate Veo 3.1:
+     *   - prompt: texto descriptivo
+     *   - aspect_ratio: "16:9" o "9:16"
+     *   - duration: 4, 6, 8 segundos
+     *   - resolution: "720p" o "1080p"
+     *   - generate_audio: true/false
+     *   - image: URL de imagen de inicio
+     *   - last_frame: URL de imagen de fin
+     *   - negative_prompt: lo que NO quieres
+     *   - reference_images: array de 1-3 URLs para consistencia de sujeto
+     * 
+     * @see https://replicate.com/google/veo-3.1/api
+     * ========================================================================
+     */
+    public function generarConVeo31($data): void
+    {
+        try {
+            Log::info('🚀 [VEO 3.1 REPLICATE] Iniciando generación', $data);
+            
+            // ✅ Subir imágenes a S3 y obtener URLs (Replicate usa URLs, no base64)
+            $imagenesS3 = $this->procesarYSubirImagenesAS3();
+            
+            Log::info('📷 [VEO 3.1 REPLICATE] Imágenes procesadas', [
+                'totalImagenes' => count($imagenesS3),
+                'tieneInicio' => isset($imagenesS3[0]),
+                'tieneFin' => isset($imagenesS3[1])
+            ]);
+            
+            // ✅ Mapear duración: Veo 3.1 acepta 4, 6 u 8 segundos
+            $duration = $this->durationSeconds;
+            if (!in_array($duration, [4, 6, 8])) {
+                $duration = 8; // Por defecto 8 segundos
+            }
+            
+            // ✅ Llamar al servicio Google (Replicate)
+            $response = GoogleService::generateVideoVeo31(
+                prompt: $data['prompt'],
+                aspectRatio: $data['ratio'],
+                duration: $duration,
+                resolution: $this->resolution,
+                generateAudio: $this->generateAudio,
+                imageUrl: $imagenesS3[0] ?? null,       // Imagen de inicio
+                lastFrameUrl: $imagenesS3[1] ?? null,   // Imagen de fin (last_frame)
+                negativePrompt: null,
+                referenceImages: [],
+                seed: null
+            );
+            
+            if (!($response['success'] ?? false)) {
+                $errorMessage = 'Error con Veo 3.1: ' . ($response['error'] ?? 'Error desconocido');
+                $this->addError('promptText', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'generation', 
+                    tool: 'video-generator'
+                );
+                
+                $this->dispatch('videoGenerationError');
+                $this->isGenerating = false;
+                return;
+            }
+            
+            // Obtener el ID de predicción para el polling
+            $predictionId = $response['prediction_id'] ?? null;
+            
+            if (!$predictionId) {
+                throw new \Exception('No se recibió ID de predicción de Replicate');
+            }
+            
+            Log::info('✅ [VEO 3.1 REPLICATE] Predicción creada', [
+                'predictionId' => $predictionId,
+                'status' => $response['status'] ?? 'unknown',
+                'duration' => $duration,
+                'resolution' => $this->resolution,
+                'audio' => $this->generateAudio
+            ]);
+            
+            // Disparar evento para iniciar polling
+            $this->dispatch('videoTaskStarted', 
+                generationId: $predictionId,
+                prompt: $data['prompt'],
+                model: $data['model'],
+                ratio: $data['ratio'],
+                count: $data['count']
+            );
+            
+        } catch (\Exception $e) {
+            $errorMessage = 'Error generando con Veo 3.1: ' . $e->getMessage();
+            $this->addError('promptText', $errorMessage);
+            
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+            $this->isGenerating = false;
+        }
+    }
+
+    /**
+     * ========================================================================
+     * MÉTODO PARA KLING v2.5 TURBO PRO (via REPLICATE)
+     * ========================================================================
+     * 
+     * Kling usa KwaivgiService en Replicate:
+     * - Soporta imagen de inicio (start_image)
+     * - Múltiples aspect ratios (16:9, 9:16, 1:1)
+     * - Duraciones: 5 o 10 segundos
+     * - Negative prompt
+     * 
+     * Reutiliza la misma lógica de Veo 3.1 para subir imágenes a S3
+     * 
+     * @see https://replicate.com/kwaivgi/kling-v2.5-turbo-pro/api
+     * ========================================================================
+     */
+    public function generarConKling($data): void
+    {
+        try {
+            Log::info('🚀 [KLING REPLICATE] Iniciando generación', $data);
+            
+            // ✅ Subir imágenes a S3 y obtener URLs (Replicate usa URLs, no base64)
+            // Reutilizamos el mismo método que Veo 3.1
+            $imagenesS3 = $this->procesarYSubirImagenesAS3();
+            
+            Log::info('📷 [KLING REPLICATE] Imágenes procesadas', [
+                'totalImagenes' => count($imagenesS3),
+                'tieneInicio' => isset($imagenesS3[0])
+            ]);
+            
+            // ✅ Mapear duración: Kling acepta 5 o 10 segundos
+            $duration = $this->durationSeconds;
+            if (!in_array($duration, [5, 10])) {
+                $duration = 5; // Por defecto 5 segundos
+            }
+            
+            // ✅ Llamar al servicio Kwaivgi (Replicate)
+            $response = KwaivgiService::generateVideoKling(
+                prompt: $data['prompt'],
+                aspectRatio: $data['ratio'],
+                duration: $duration,
+                startImageUrl: $imagenesS3[0] ?? null,  // Solo imagen de inicio (Kling no tiene last_frame)
+                negativePrompt: null
+            );
+            
+            if (!($response['success'] ?? false)) {
+                $errorMessage = 'Error con Kling: ' . ($response['error'] ?? 'Error desconocido');
+                $this->addError('promptText', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'generation', 
+                    tool: 'video-generator'
+                );
+                
+                $this->dispatch('videoGenerationError');
+                $this->isGenerating = false;
+                return;
+            }
+            
+            // Obtener el ID de predicción para el polling
+            $predictionId = $response['prediction_id'] ?? null;
+            
+            if (!$predictionId) {
+                throw new \Exception('No se recibió ID de predicción de Replicate');
+            }
+            
+            Log::info('✅ [KLING REPLICATE] Predicción creada', [
+                'predictionId' => $predictionId,
+                'status' => $response['status'] ?? 'unknown',
+                'duration' => $duration
+            ]);
+            
+            // Disparar evento para iniciar polling
+            $this->dispatch('videoTaskStarted', 
+                generationId: $predictionId,
+                prompt: $data['prompt'],
+                model: $data['model'],
+                ratio: $data['ratio'],
+                count: $data['count']
+            );
+            
+        } catch (\Exception $e) {
+            $errorMessage = 'Error generando con Kling: ' . $e->getMessage();
+            $this->addError('promptText', $errorMessage);
+            
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+            $this->isGenerating = false;
         }
     }
 
@@ -823,29 +1603,6 @@ class VideoGenerator extends Component
         }
     }
 
-    public function generarConGen3AlphaTurbo($data): void
-    {
-        try {
-            Log::info('🚀 Iniciando generación con Gen3-AlphaTurbo', $data);
-            
-            // Llamar al método unificado de Runway
-            $this->generarConRunway($data, 'gen3a_turbo');
-            
-        } catch (\Exception $e) {
-            $errorMessage = 'Error generando con Gen3-AlphaTurbo: ' . $e->getMessage();
-            $this->addError('promptText', $errorMessage);
-            
-            $this->dispatch('addErrorToList', 
-                message: $errorMessage, 
-                type: 'system', 
-                tool: 'video-generator'
-            );
-            
-            $this->dispatch('videoGenerationError');
-            $this->isGenerating = false; // ✅ Resetear estado de generación
-        }
-    }
-
     public function generarConRay2($data): void
     {
         try {
@@ -879,6 +1636,105 @@ class VideoGenerator extends Component
             
         } catch (\Exception $e) {
             $errorMessage = 'Error generando con Ray2-Flash: ' . $e->getMessage();
+            $this->addError('promptText', $errorMessage);
+            
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+            $this->isGenerating = false; // ✅ Resetear estado de generación
+        }
+    }
+
+    public function generarConSora($data): void
+    {
+        try {
+            Log::info('🚀 Iniciando generación con Sora', [
+                'model' => $data['model'],
+                'prompt' => $data['prompt'],
+                'ratio' => $data['ratio'],
+                'hasImageFilesStart' => !empty($this->imageFilesStart),
+                'fromHistory' => $this->fromHistory,
+                'hasImageUrl' => !empty($this->imageUrl)
+            ]);
+
+            // ✅ VALIDACIÓN ADICIONAL: Verificar que la imagen sea válida para el modelo
+            if ($this->tieneImagenCargada()) {
+                $this->validarImagenParaModelo();
+                
+                // Si la validación falló, la imagen fue eliminada automáticamente
+                // Verificar si aún hay imagen después de la validación
+                if (!$this->tieneImagenCargada()) {
+                    $errorMessage = 'La imagen no es compatible con ' . $this->getModelDisplayName($this->model) . '.';
+                    $this->addError('promptText', $errorMessage);
+                    
+                    $this->dispatch('addErrorToList', 
+                        message: $errorMessage, 
+                        type: 'validation', 
+                        tool: 'video-generator'
+                    );
+                    
+                    $this->dispatch('videoGenerationError');
+                    $this->isGenerating = false;
+                    return;
+                }
+            }
+
+            // Mapear ratio al formato de OpenAI (widthxheight)
+            $size = $this->mapearRatioASora($data['ratio']);
+            
+            // Procesar imagen para Sora si está disponible
+            $imageData = $this->procesarImagenParaSora($size);
+            
+            if ($imageData) {
+                Log::info('📷 Imagen procesada para Sora', [
+                    'hasImage' => true,
+                    'fileName' => $imageData['fileName'] ?? 'unknown',
+                    'sizeKB' => round(strlen($imageData['content']) / 1024, 2)
+                ]);
+            }
+            
+            // Llamar al servicio OpenAI para crear el video
+            $response = \App\Services\OpenAiService::createVideo(
+                prompt: $data['prompt'],
+                model: $data['model'],
+                size: $size,
+                seconds: (string)$this->durationSeconds, // Duración en segundos
+                imageData: $imageData // Puede ser null si no hay imagen
+            );
+
+            if (isset($response['error'])) {
+                $errorMessage = 'Error con Sora: ' . $response['error'];
+                throw new \Exception($errorMessage);
+            }
+
+            // Obtener el ID del video
+            $videoId = $response['id'] ?? null;
+            if (!$videoId) {
+                throw new \Exception('No se recibió ID de video de Sora');
+            }
+
+            Log::info("✅ Sora iniciado correctamente", [
+                'videoId' => $videoId,
+                'model' => $data['model'],
+                'status' => $response['status'] ?? 'unknown',
+                'withImage' => $imageData !== null
+            ]);
+
+            // Disparar evento para iniciar polling
+            $this->dispatch('videoTaskStarted', 
+                generationId: $videoId,
+                prompt: $data['prompt'],
+                model: $data['model'],
+                ratio: $data['ratio'],
+                count: $data['count']
+            );
+
+        } catch (\Exception $e) {
+            $errorMessage = 'Error generando con Sora: ' . $e->getMessage();
             $this->addError('promptText', $errorMessage);
             
             $this->dispatch('addErrorToList', 
@@ -996,7 +1852,7 @@ class VideoGenerator extends Component
     }
 
     /**
-     * Método unificado para generar videos con Runway (Gen3 y Gen4)
+     * Método unificado para generar videos con Runway (Gen4-Turbo)
      */
     private function generarConRunway($data, $modelo): void
     {
@@ -1035,40 +1891,15 @@ class VideoGenerator extends Component
                 'imagesWithPositions' => []
             ];
 
-            // Agregar imágenes según el modelo
+            // Agregar imágenes: Gen4-Turbo solo acepta imagen en posición 'first'
             if (!empty($imagenesS3)) {
-                if ($modelo === 'gen4_turbo') {
-                    // Gen4 solo acepta imagen en posición 'first'
-                    $payload['imagesWithPositions'] = [
-                        [
-                            'uri' => $imagenesS3[0],
-                            'position' => 'first'
-                        ]
-                    ];
-                    Log::info("📷 Agregando imagen para Gen4-Turbo (solo first)");
-                } else {
-                    // Gen3 acepta imágenes en 'first' y 'last'
-                    $payload['imagesWithPositions'] = [];
-                    
-                    if (isset($imagenesS3[0])) {
-                        $payload['imagesWithPositions'][] = [
-                            'uri' => $imagenesS3[0],
-                            'position' => 'first'
-                        ];
-                    }
-                    
-                    if (isset($imagenesS3[1])) {
-                        $payload['imagesWithPositions'][] = [
-                            'uri' => $imagenesS3[1],
-                            'position' => 'last'
-                        ];
-                    }
-                    
-                    Log::info("📷 Agregando imágenes para Gen3-AlphaTurbo", [
-                        'first' => isset($imagenesS3[0]),
-                        'last' => isset($imagenesS3[1])
-                    ]);
-                }
+                $payload['imagesWithPositions'] = [
+                    [
+                        'uri' => $imagenesS3[0],
+                        'position' => 'first'
+                    ]
+                ];
+                Log::info("📷 Agregando imagen para Gen4-Turbo (first)");
             }
 
             // Llamar al servicio Runway
@@ -1111,6 +1942,560 @@ class VideoGenerator extends Component
                 'data' => $data
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Procesa imagen para Sora (OpenAI) - SIN redimensionamiento
+     * La imagen ya fue validada para tener el tamaño exacto (1280x720 o 720x1280)
+     * Retorna array con 'content' (binario original), 'mimeType', 'fileName' o null
+     */
+    private function procesarImagenParaSora(string $targetSize): ?array
+    {
+        try {
+            if ($this->fromHistory && $this->imageUrl) {
+                // Para imágenes del historial, descargar directamente
+                Log::info('📥 Descargando imagen del historial para Sora', [
+                    'imageUrl' => $this->imageUrl,
+                    'targetSize' => $targetSize
+                ]);
+                
+                $imageContent = file_get_contents($this->imageUrl);
+                if ($imageContent === false) {
+                    throw new \Exception('No se pudo descargar la imagen del historial');
+                }
+                
+                $fileName = basename($this->imageUrl);
+                $mimeType = mime_content_type($this->imageUrl) ?? 'image/jpeg';
+                
+                Log::info('✅ Imagen del historial lista para Sora (sin redimensionar)', [
+                    'fileName' => $fileName,
+                    'size' => strlen($imageContent),
+                    'sizeKB' => round(strlen($imageContent) / 1024, 2)
+                ]);
+                
+                return [
+                    'content' => $imageContent,
+                    'mimeType' => $mimeType,
+                    'fileName' => $fileName,
+                ];
+                
+            } elseif (!empty($this->imageFilesStart)) {
+                // Para imágenes subidas, leer directamente sin modificar
+                $image = $this->imageFilesStart[0]; // Tomar solo la primera imagen
+                
+                try {
+                    $imagePath = $image->getRealPath();
+                    $fileName = $image->getClientOriginalName();
+                    $imageContent = file_get_contents($imagePath);
+                    
+                    if ($imageContent === false) {
+                        throw new \Exception('No se pudo leer el contenido de la imagen');
+                    }
+                    
+                    Log::info("📷 Imagen subida lista para Sora (sin redimensionar)", [
+                        'fileName' => $fileName,
+                        'size' => strlen($imageContent),
+                        'sizeKB' => round(strlen($imageContent) / 1024, 2)
+                    ]);
+                    
+                    return [
+                        'content' => $imageContent,
+                        'mimeType' => $image->getMimeType(),
+                        'fileName' => $fileName,
+                    ];
+                    
+                } catch (\Exception $e) {
+                    Log::warning("⚠️ Error procesando imagen para Sora", [
+                        'error' => $e->getMessage()
+                    ]);
+                    return null;
+                }
+            }
+            
+            Log::info("📷 No hay imágenes para Sora");
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error("💥 Error en procesarImagenParaSora", [
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Valida si una imagen tiene el aspect ratio correcto
+     * 
+     * @param string $imagePath Ruta de la imagen
+     * @param string $ratioRequerido Ratio requerido (ej: '16:9', '9:16', '1:1')
+     * @param float $tolerancia Tolerancia en la comparación (default 0.02 = 2%)
+     * @return array ['valido' => bool, 'ratioActual' => float, 'ratioRequerido' => float, 'dimensiones' => array]
+     */
+    private function validarAspectRatioImagen(string $imagePath, string $ratioRequerido, float $tolerancia = 0.02): array
+    {
+        try {
+            // Obtener dimensiones de la imagen
+            $imageInfo = getimagesize($imagePath);
+            if (!$imageInfo) {
+                throw new \Exception('No se pudieron obtener las dimensiones de la imagen');
+            }
+            
+            $width = $imageInfo[0];
+            $height = $imageInfo[1];
+            
+            // Calcular ratio actual
+            $ratioActual = $width / $height;
+            
+            // Convertir ratio requerido a decimal
+            $ratioRequeridoDecimal = $this->convertirRatioADecimal($ratioRequerido);
+            
+            // Comparar con tolerancia
+            $diferencia = abs($ratioActual - $ratioRequeridoDecimal);
+            $esValido = $diferencia <= $tolerancia;
+            
+            Log::info('📐 Validación de aspect ratio', [
+                'dimensiones' => "{$width}x{$height}",
+                'ratioActual' => round($ratioActual, 4),
+                'ratioRequerido' => $ratioRequerido,
+                'ratioRequeridoDecimal' => round($ratioRequeridoDecimal, 4),
+                'diferencia' => round($diferencia, 4),
+                'tolerancia' => $tolerancia,
+                'esValido' => $esValido
+            ]);
+            
+            return [
+                'valido' => $esValido,
+                'ratioActual' => $ratioActual,
+                'ratioRequerido' => $ratioRequeridoDecimal,
+                'dimensiones' => ['width' => $width, 'height' => $height],
+                'diferencia' => $diferencia
+            ];
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error validando aspect ratio', ['error' => $e->getMessage()]);
+            return [
+                'valido' => false,
+                'ratioActual' => 0,
+                'ratioRequerido' => 0,
+                'dimensiones' => ['width' => 0, 'height' => 0],
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+    
+    /**
+     * Convierte un ratio en formato string a decimal
+     * 
+     * @param string $ratio Ratio en formato '16:9', '9:16', '1:1', etc.
+     * @return float Ratio en decimal
+     */
+    private function convertirRatioADecimal(string $ratio): float
+    {
+        $ratiosDecimales = [
+            '16:9' => 16/9,    // 1.778
+            '9:16' => 9/16,    // 0.5625
+            '1:1' => 1.0,      // 1.0
+            '4:3' => 4/3,      // 1.333
+            '3:4' => 3/4,      // 0.75
+            '21:9' => 21/9,    // 2.333
+        ];
+        
+        return $ratiosDecimales[$ratio] ?? 1.0;
+    }
+    
+    /**
+     * Formatea un ratio decimal a formato legible
+     * 
+     * @param float $ratio Ratio en decimal
+     * @return string Ratio formateado (ej: '16:9', '2.46:1')
+     */
+    private function formatearRatioParaUsuario(float $ratio): string
+    {
+        // Intentar encontrar un ratio conocido cercano
+        $ratiosConocidos = [
+            16/9 => '16:9',
+            9/16 => '9:16',
+            1.0 => '1:1',
+            4/3 => '4:3',
+            3/4 => '3:4',
+            21/9 => '21:9',
+        ];
+        
+        foreach ($ratiosConocidos as $decimal => $formato) {
+            if (abs($ratio - $decimal) < 0.01) {
+                return $formato;
+            }
+        }
+        
+        // Si no coincide con ninguno conocido, formatear como X:1
+        return round($ratio, 2) . ':1';
+    }
+    
+    /**
+     * Obtiene las dimensiones target para cada modelo y ratio
+     * 
+     * @param string $modelo Modelo de video
+     * @param string $ratio Ratio seleccionado
+     * @return array ['width' => int, 'height' => int]
+     */
+    private function obtenerDimensionesTargetParaModelo(string $modelo, string $ratio): array
+    {
+        // Dimensiones estándar por ratio para la mayoría de modelos
+        $dimensionesEstandar = [
+            '16:9' => ['width' => 1280, 'height' => 720],
+            '9:16' => ['width' => 720, 'height' => 1280],
+            '1:1' => ['width' => 1024, 'height' => 1024],
+            '4:3' => ['width' => 1024, 'height' => 768],
+            '3:4' => ['width' => 768, 'height' => 1024],
+            '21:9' => ['width' => 1344, 'height' => 576],
+        ];
+        
+        // Para Runway Gen4, usar dimensiones específicas
+        if ($modelo === 'gen4_turbo') {
+            $dimensionesRunway = [
+                '16:9' => ['width' => 1280, 'height' => 720],
+                '9:16' => ['width' => 720, 'height' => 1280],
+                '1:1' => ['width' => 960, 'height' => 960],
+                '4:3' => ['width' => 1104, 'height' => 832],
+                '3:4' => ['width' => 832, 'height' => 1104],
+                '21:9' => ['width' => 1584, 'height' => 672]
+            ];
+            return $dimensionesRunway[$ratio] ?? $dimensionesEstandar[$ratio] ?? ['width' => 1280, 'height' => 720];
+        }
+        
+        return $dimensionesEstandar[$ratio] ?? ['width' => 1280, 'height' => 720];
+    }
+    
+    /**
+     * Redimensiona una imagen con CROP inteligente (como Photoshop) - SIN distorsión
+     * 
+     * @param string $sourcePath Ruta de la imagen origen
+     * @param int $targetWidth Ancho objetivo
+     * @param int $targetHeight Alto objetivo
+     * @return array ['success' => bool, 'imageData' => string|null, 'newDimensions' => array, 'cropInfo' => array]
+     */
+    private function redimensionarImagenConCropInteligente(string $sourcePath, int $targetWidth, int $targetHeight): array
+    {
+        try {
+            $imageInfo = getimagesize($sourcePath);
+            if (!$imageInfo) {
+                throw new \Exception('No se pudieron obtener las dimensiones de la imagen');
+            }
+            
+            $originalWidth = $imageInfo[0];
+            $originalHeight = $imageInfo[1];
+            $mimeType = $imageInfo['mime'];
+            
+            // Calcular el ratio objetivo
+            $targetRatio = $targetWidth / $targetHeight;
+            $originalRatio = $originalWidth / $originalHeight;
+            
+            // Crear imagen desde el archivo
+            $sourceImage = null;
+            switch ($mimeType) {
+                case 'image/jpeg':
+                    $sourceImage = imagecreatefromjpeg($sourcePath);
+                    break;
+                case 'image/png':
+                    $sourceImage = imagecreatefrompng($sourcePath);
+                    break;
+                case 'image/gif':
+                    $sourceImage = imagecreatefromgif($sourcePath);
+                    break;
+                case 'image/webp':
+                    $sourceImage = imagecreatefromwebp($sourcePath);
+                    break;
+                default:
+                    throw new \Exception('Formato de imagen no soportado: ' . $mimeType);
+            }
+            
+            if (!$sourceImage) {
+                throw new \Exception('No se pudo crear la imagen desde el archivo');
+            }
+            
+            // Calcular dimensiones de crop para mantener el ratio objetivo
+            if ($originalRatio > $targetRatio) {
+                // La imagen es más ancha que el objetivo - crop horizontal
+                $cropHeight = $originalHeight;
+                $cropWidth = (int)($originalHeight * $targetRatio);
+                $cropX = (int)(($originalWidth - $cropWidth) / 2); // Centrar horizontalmente
+                $cropY = 0;
+            } else {
+                // La imagen es más alta que el objetivo - crop vertical
+                $cropWidth = $originalWidth;
+                $cropHeight = (int)($originalWidth / $targetRatio);
+                $cropX = 0;
+                $cropY = (int)(($originalHeight - $cropHeight) / 2); // Centrar verticalmente
+            }
+            
+            // Crear nueva imagen con las dimensiones target
+            $newImage = imagecreatetruecolor($targetWidth, $targetHeight);
+            
+            // Preservar transparencia para PNG
+            if ($mimeType === 'image/png') {
+                imagealphablending($newImage, false);
+                imagesavealpha($newImage, true);
+                $transparent = imagecolorallocatealpha($newImage, 255, 255, 255, 127);
+                imagefilledrectangle($newImage, 0, 0, $targetWidth, $targetHeight, $transparent);
+            }
+            
+            // Hacer el crop y redimensionar
+            imagecopyresampled(
+                $newImage, $sourceImage,
+                0, 0, $cropX, $cropY,
+                $targetWidth, $targetHeight, $cropWidth, $cropHeight
+            );
+            
+            // Guardar en buffer
+            ob_start();
+            imagejpeg($newImage, null, 95); // 95% de calidad
+            $imageData = ob_get_clean();
+            
+            // Liberar memoria
+            imagedestroy($sourceImage);
+            imagedestroy($newImage);
+            
+            $cropInfo = [
+                'cropX' => $cropX,
+                'cropY' => $cropY,
+                'cropWidth' => $cropWidth,
+                'cropHeight' => $cropHeight,
+                'originalRatio' => round($originalRatio, 4),
+                'targetRatio' => round($targetRatio, 4)
+            ];
+            
+            Log::info('✅ Imagen redimensionada con CROP inteligente', [
+                'original' => "{$originalWidth}x{$originalHeight}",
+                'crop' => "{$cropWidth}x{$cropHeight} desde ({$cropX},{$cropY})",
+                'nueva' => "{$targetWidth}x{$targetHeight}",
+                'sinDistorsion' => true
+            ]);
+            
+            return [
+                'success' => true,
+                'imageData' => $imageData,
+                'newDimensions' => ['width' => $targetWidth, 'height' => $targetHeight],
+                'cropInfo' => $cropInfo,
+                'resized' => true
+            ];
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error redimensionando imagen con CROP', ['error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'imageData' => null,
+                'newDimensions' => ['width' => 0, 'height' => 0],
+                'cropInfo' => [],
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Redimensiona una imagen FORZANDO un nuevo aspect ratio (con posible distorsión)
+     * 
+     * @param string $sourcePath Ruta de la imagen origen
+     * @param int $targetWidth Ancho objetivo
+     * @param int $targetHeight Alto objetivo
+     * @return array ['success' => bool, 'imageData' => string|null, 'newDimensions' => array]
+     */
+    private function redimensionarImagenConNuevoRatio(string $sourcePath, int $targetWidth, int $targetHeight): array
+    {
+        try {
+            $imageInfo = getimagesize($sourcePath);
+            if (!$imageInfo) {
+                throw new \Exception('No se pudieron obtener las dimensiones de la imagen');
+            }
+            
+            $originalWidth = $imageInfo[0];
+            $originalHeight = $imageInfo[1];
+            $mimeType = $imageInfo['mime'];
+            
+            // Crear imagen desde el archivo
+            $sourceImage = null;
+            switch ($mimeType) {
+                case 'image/jpeg':
+                    $sourceImage = imagecreatefromjpeg($sourcePath);
+                    break;
+                case 'image/png':
+                    $sourceImage = imagecreatefrompng($sourcePath);
+                    break;
+                case 'image/gif':
+                    $sourceImage = imagecreatefromgif($sourcePath);
+                    break;
+                case 'image/webp':
+                    $sourceImage = imagecreatefromwebp($sourcePath);
+                    break;
+                default:
+                    throw new \Exception('Formato de imagen no soportado: ' . $mimeType);
+            }
+            
+            if (!$sourceImage) {
+                throw new \Exception('No se pudo crear la imagen desde el archivo');
+            }
+            
+            // Crear nueva imagen con las dimensiones target
+            $newImage = imagecreatetruecolor($targetWidth, $targetHeight);
+            
+            // Preservar transparencia para PNG
+            if ($mimeType === 'image/png') {
+                imagealphablending($newImage, false);
+                imagesavealpha($newImage, true);
+                $transparent = imagecolorallocatealpha($newImage, 255, 255, 255, 127);
+                imagefilledrectangle($newImage, 0, 0, $targetWidth, $targetHeight, $transparent);
+            }
+            
+            // Redimensionar (esto PUEDE distorsionar si los ratios son diferentes)
+            imagecopyresampled($newImage, $sourceImage, 0, 0, 0, 0, $targetWidth, $targetHeight, $originalWidth, $originalHeight);
+            
+            // Guardar en buffer
+            ob_start();
+            imagejpeg($newImage, null, 95); // 95% de calidad
+            $imageData = ob_get_clean();
+            
+            // Liberar memoria
+            imagedestroy($sourceImage);
+            imagedestroy($newImage);
+            
+            Log::info('✅ Imagen redimensionada con nuevo ratio', [
+                'original' => "{$originalWidth}x{$originalHeight}",
+                'nueva' => "{$targetWidth}x{$targetHeight}",
+                'ratioOriginal' => round($originalWidth / $originalHeight, 4),
+                'ratioNuevo' => round($targetWidth / $targetHeight, 4)
+            ]);
+            
+            return [
+                'success' => true,
+                'imageData' => $imageData,
+                'newDimensions' => ['width' => $targetWidth, 'height' => $targetHeight],
+                'resized' => true
+            ];
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error redimensionando imagen con nuevo ratio', ['error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'imageData' => null,
+                'newDimensions' => ['width' => 0, 'height' => 0],
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Redimensiona una imagen manteniendo el aspect ratio
+     * 
+     * @param string $sourcePath Ruta de la imagen origen
+     * @param int $maxWidth Ancho máximo permitido
+     * @param int $maxHeight Alto máximo permitido
+     * @return array ['success' => bool, 'imageData' => string|null, 'newDimensions' => array]
+     */
+    private function redimensionarImagen(string $sourcePath, int $maxWidth, int $maxHeight): array
+    {
+        try {
+            $imageInfo = getimagesize($sourcePath);
+            if (!$imageInfo) {
+                throw new \Exception('No se pudieron obtener las dimensiones de la imagen');
+            }
+            
+            $originalWidth = $imageInfo[0];
+            $originalHeight = $imageInfo[1];
+            $mimeType = $imageInfo['mime'];
+            
+            // Si la imagen ya es del tamaño correcto o menor, no redimensionar
+            if ($originalWidth <= $maxWidth && $originalHeight <= $maxHeight) {
+                Log::info('✅ Imagen no requiere redimensionamiento', [
+                    'original' => "{$originalWidth}x{$originalHeight}",
+                    'maximo' => "{$maxWidth}x{$maxHeight}"
+                ]);
+                
+                return [
+                    'success' => true,
+                    'imageData' => file_get_contents($sourcePath),
+                    'newDimensions' => ['width' => $originalWidth, 'height' => $originalHeight],
+                    'resized' => false
+                ];
+            }
+            
+            // Calcular nuevas dimensiones manteniendo aspect ratio
+            $ratio = $originalWidth / $originalHeight;
+            
+            if ($originalWidth > $originalHeight) {
+                $newWidth = $maxWidth;
+                $newHeight = (int)($maxWidth / $ratio);
+            } else {
+                $newHeight = $maxHeight;
+                $newWidth = (int)($maxHeight * $ratio);
+            }
+            
+            // Crear imagen desde el archivo
+            $sourceImage = null;
+            switch ($mimeType) {
+                case 'image/jpeg':
+                    $sourceImage = imagecreatefromjpeg($sourcePath);
+                    break;
+                case 'image/png':
+                    $sourceImage = imagecreatefrompng($sourcePath);
+                    break;
+                case 'image/gif':
+                    $sourceImage = imagecreatefromgif($sourcePath);
+                    break;
+                case 'image/webp':
+                    $sourceImage = imagecreatefromwebp($sourcePath);
+                    break;
+                default:
+                    throw new \Exception('Formato de imagen no soportado: ' . $mimeType);
+            }
+            
+            if (!$sourceImage) {
+                throw new \Exception('No se pudo crear la imagen desde el archivo');
+            }
+            
+            // Crear nueva imagen redimensionada
+            $newImage = imagecreatetruecolor($newWidth, $newHeight);
+            
+            // Preservar transparencia para PNG
+            if ($mimeType === 'image/png') {
+                imagealphablending($newImage, false);
+                imagesavealpha($newImage, true);
+                $transparent = imagecolorallocatealpha($newImage, 255, 255, 255, 127);
+                imagefilledrectangle($newImage, 0, 0, $newWidth, $newHeight, $transparent);
+            }
+            
+            // Redimensionar
+            imagecopyresampled($newImage, $sourceImage, 0, 0, 0, 0, $newWidth, $newHeight, $originalWidth, $originalHeight);
+            
+            // Guardar en buffer
+            ob_start();
+            imagejpeg($newImage, null, 95); // 95% de calidad
+            $imageData = ob_get_clean();
+            
+            // Liberar memoria
+            imagedestroy($sourceImage);
+            imagedestroy($newImage);
+            
+            Log::info('✅ Imagen redimensionada exitosamente', [
+                'original' => "{$originalWidth}x{$originalHeight}",
+                'nueva' => "{$newWidth}x{$newHeight}",
+                'ratio' => round($ratio, 4)
+            ]);
+            
+            return [
+                'success' => true,
+                'imageData' => $imageData,
+                'newDimensions' => ['width' => $newWidth, 'height' => $newHeight],
+                'resized' => true
+            ];
+            
+        } catch (\Exception $e) {
+            Log::error('❌ Error redimensionando imagen', ['error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'imageData' => null,
+                'newDimensions' => ['width' => 0, 'height' => 0],
+                'error' => $e->getMessage()
+            ];
         }
     }
 
@@ -1185,6 +2570,60 @@ class VideoGenerator extends Component
 
         } catch (\Exception $e) {
             Log::error("💥 Error en procesarImagenesABase64ParaVeo2", [
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * ========================================================================
+     * MÉTODO EXCLUSIVO PARA VEO 3.1: Procesar imagen de FIN (lastFrame)
+     * ========================================================================
+     * 
+     * Veo 3.1 soporta especificar una imagen de fin (lastFrame) además de la
+     * imagen de inicio. Este método procesa imageFilesEnd a base64.
+     * 
+     * NOTA: Veo2 NO soporta lastFrame, solo Veo 3.1
+     * ========================================================================
+     */
+    private function procesarImagenFinABase64(): ?array
+    {
+        try {
+            // Solo procesar si hay imágenes de fin subidas
+            if (!empty($this->imageFilesEnd)) {
+                $image = $this->imageFilesEnd[0]; // Tomar solo la primera imagen
+                
+                try {
+                    $imageContent = file_get_contents($image->getRealPath());
+                    $base64Image = base64_encode($imageContent);
+                    $mimeType = $image->getMimeType();
+                    
+                    Log::info("📷 [VEO 3.1] Imagen de FIN convertida a base64", [
+                        'imageSize' => strlen($imageContent),
+                        'base64Size' => strlen($base64Image),
+                        'mimeType' => $mimeType,
+                        'fileName' => $image->getClientOriginalName()
+                    ]);
+                    
+                    return [
+                        'base64' => $base64Image,
+                        'mimeType' => $mimeType
+                    ];
+                    
+                } catch (\Exception $e) {
+                    Log::warning("⚠️ [VEO 3.1] Error procesando imagen de FIN", [
+                        'error' => $e->getMessage()
+                    ]);
+                    return null;
+                }
+            }
+            
+            Log::info("📷 [VEO 3.1] No hay imagen de FIN");
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error("💥 [VEO 3.1] Error en procesarImagenFinABase64", [
                 'error' => $e->getMessage()
             ]);
             return null;
@@ -1287,10 +2726,10 @@ class VideoGenerator extends Component
     }
 
     /**
-     * Mapea los ratios de aspecto a los tamaños fijos que acepta Runway
+     * Mapea los ratios de aspecto a los tamaños fijos que acepta Runway (Gen4-Turbo)
      * 
      * @param string $ratio Ratio de aspecto (ej: '16:9', '9:16', '1:1')
-     * @param string $modelo Modelo de Runway ('gen4_turbo' o 'gen3a_turbo')
+     * @param string $modelo Modelo de Runway ('gen4_turbo')
      * @return string Ratio en formato Runway (ej: '1280:720')
      */
     private function mapearRatioARunway(string $ratio, string $modelo): string
@@ -1300,36 +2739,15 @@ class VideoGenerator extends Component
             'modelo' => $modelo
         ]);
 
-        // Definir mapeo según el modelo
-        $mapeoRatios = [];
-        
-        if ($modelo === 'gen4_turbo') {
-            // ✅ Gen4-Turbo: 6 ratios disponibles (según documentación oficial)
-            $mapeoRatios = [
-                '16:9' => '1280:720',   // Panorámico
-                '9:16' => '720:1280',   // Vertical móvil
-                '1:1' => '960:960',     // Cuadrado
-                '4:3' => '1104:832',    // Horizontal
-                '3:4' => '832:1104',    // Vertical
-                '21:9' => '1584:672'    // Ultra panorámico
-            ];
-        } elseif ($modelo === 'gen3a_turbo') {
-            // ✅ Gen3-AlphaTurbo: Solo 2 ratios disponibles (según documentación oficial)
-            $mapeoRatios = [
-                '16:9' => '1280:768',   // Panorámico
-                '9:16' => '768:1280'    // Vertical móvil
-            ];
-        } else {
-            // Fallback para modelos no reconocidos
-            $mapeoRatios = [
-                '16:9' => '1280:720',
-                '9:16' => '720:1280',
-                '1:1' => '960:960',
-                '4:3' => '1104:832',
-                '3:4' => '832:1104',
-                '21:9' => '1584:672'
-            ];
-        }
+        // Gen4-Turbo: 6 ratios disponibles (según documentación oficial)
+        $mapeoRatios = [
+            '16:9' => '1280:720',   // Panorámico
+            '9:16' => '720:1280',   // Vertical móvil
+            '1:1' => '960:960',     // Cuadrado
+            '4:3' => '1104:832',    // Horizontal
+            '3:4' => '832:1104',    // Vertical
+            '21:9' => '1584:672'    // Ultra panorámico
+        ];
 
         // Buscar el ratio mapeado
         $runwayRatio = $mapeoRatios[$ratio] ?? null;
@@ -1355,12 +2773,56 @@ class VideoGenerator extends Component
     }
 
     /**
+     * Mapea los ratios de aspecto al formato que acepta Sora (OpenAI)
+     * Solo acepta 4 tamaños específicos según la documentación de OpenAI
+     * 
+     * @param string $ratio Ratio de aspecto (ej: '16:9', '9:16')
+     * @return string Size en formato OpenAI (ej: '1280x720')
+     */
+    private function mapearRatioASora(string $ratio): string
+    {
+        Log::info("📐 Mapeando ratio a formato Sora", [
+            'inputRatio' => $ratio
+        ]);
+
+        // Mapeo de ratios a tamaños de Sora
+        // OpenAI solo acepta estos 4 tamaños exactos: 720x1280, 1280x720, 1024x1792, 1792x1024
+        $mapeoRatios = [
+            '16:9' => '1280x720',   // Panorámico HD (16:9)
+            '9:16' => '720x1280',   // Vertical móvil HD (9:16)
+        ];
+
+        // Buscar el ratio mapeado
+        $soraSize = $mapeoRatios[$ratio] ?? null;
+        
+        if ($soraSize === null) {
+            // ❌ Ratio no soportado
+            $errorMessage = "El ratio '{$ratio}' no es soportado por Sora. Solo se permiten 16:9 y 9:16";
+            Log::error("❌ Ratio no soportado para Sora", [
+                'ratio' => $ratio,
+                'ratiosDisponibles' => array_keys($mapeoRatios)
+            ]);
+            throw new \Exception($errorMessage);
+        }
+
+        Log::info("✅ Ratio mapeado a formato Sora", [
+            'inputRatio' => $ratio,
+            'outputSize' => $soraSize
+        ]);
+
+        return $soraSize;
+    }
+
+    /**
      * Verifica el estado de generación de video (para modelos asíncronos)
      */
     #[On('verificarEstadoVideo')]
     public function verificarEstadoVideo($generationId, $prompt, $model, $ratio, $count): void
     {
         try {
+            // ✅ Aumentar tiempo de ejecución para evitar timeout
+            ini_set('max_execution_time', 120);
+            
             Log::info('🔍 Verificando estado de video desde frontend', [
                 'generationId' => $generationId,
                 'model' => $model
@@ -1371,17 +2833,25 @@ class VideoGenerator extends Component
                 'prompt' => $prompt,
                 'model' => $model,
                 'ratio' => $ratio,
-                'count' => $count
+                'count' => $count,
+                'durationSeconds' => $this->durationSeconds ?? 4 // Duración del video para calcular costo
             ];
             
             // ✅ Usar switch para delegar a métodos específicos por modelo
             switch ($model) {
+                case 'veo3.1':
+                    $this->verificarEstadoVeo31($generationId, $datos);
+                    break;
+                    
+                case 'kling':
+                    $this->verificarEstadoKling($generationId, $datos);
+                    break;
+                    
                 case 'veo2':
                     $this->verificarEstadoVeo2($generationId, $datos);
                     break;
                     
                 case 'gen4_turbo':
-                case 'gen3a_turbo':
                     $this->verificarEstadoRunway($generationId, $datos);
                     break;
                     
@@ -1393,19 +2863,253 @@ class VideoGenerator extends Component
                     $this->verificarEstadoRay2Flash($generationId, $datos);
                     break;
                     
+                case 'sora-2':
+                case 'sora-2-pro':
+                    $this->verificarEstadoSora($generationId, $datos);
+                    break;
+                    
                 default:
                     $this->verificarEstadoGenerico($generationId, $datos);
                     break;
             }
             
         } catch (\Exception $e) {
+            $errorMessage = $e->getMessage();
+            
             Log::error('💥 Error verificando estado de video', [
-                'error' => $e->getMessage(),
+                'error' => $errorMessage,
                 'model' => $model,
                 'generationId' => $generationId
             ]);
+            
+            // ✅ Mostrar error en pantalla
+            $this->addError('promptText', $errorMessage);
+            
+            // ✅ Emitir evento para agregar al historial de errores
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'generation', 
+                tool: 'video-generator'
+            );
+            
             $this->isGenerating = false;
             $this->dispatch('videoGenerationError');
+        }
+    }
+
+    /**
+     * ========================================================================
+     * VERIFICACIÓN DE ESTADO PARA VEO 3.1
+     * ========================================================================
+     * 
+     * Usamos getVideoOperationVeo31() en lugar de getVideoOperation() porque:
+     * - Veo 3.1 requiere autenticación via header 'x-goog-api-key'
+     * - Veo 2.0 usa autenticación via parámetro de URL '?key='
+     * ========================================================================
+     */
+    /**
+     * Verifica el estado de una predicción de Veo 3.1 en Replicate
+     * 
+     * Estados de Replicate: starting, processing, succeeded, failed, canceled
+     */
+    private function verificarEstadoVeo31(string $generationId, array $datos): void
+    {
+        $this->verificarEstadoReplicate($generationId, $datos, 'VEO 3.1', GoogleService::class);
+    }
+
+    /**
+     * Verifica el estado de una predicción de Kling en Replicate
+     * 
+     * Reutiliza la misma lógica que Veo 3.1
+     */
+    private function verificarEstadoKling(string $generationId, array $datos): void
+    {
+        $this->verificarEstadoReplicate($generationId, $datos, 'KLING', KwaivgiService::class);
+    }
+
+    /**
+     * Método genérico para verificar estado de predicciones en Replicate
+     * 
+     * Reutilizado por Veo 3.1, Kling y futuros modelos de Replicate
+     * 
+     * @param string $generationId ID de la predicción
+     * @param array $datos Datos del video
+     * @param string $modelName Nombre del modelo para logs
+     * @param string $serviceClass Clase del servicio (GoogleService o KwaivgiService)
+     */
+    private function verificarEstadoReplicate(string $generationId, array $datos, string $modelName, string $serviceClass): void
+    {
+        Log::info("🎬 [{$modelName} REPLICATE] Consultando estado de predicción", [
+            'predictionId' => $generationId
+        ]);
+        
+        // ✅ Usamos el servicio correspondiente para consultar el estado
+        // Ambos servicios extienden ReplicateBaseService que tiene getPredictionStatus
+        $result = $serviceClass::getPredictionStatus($generationId);
+        
+        Log::info("📊 [{$modelName} REPLICATE] Resultado de verificación", [
+            'success' => $result['success'] ?? false,
+            'status' => $result['status'] ?? 'unknown',
+            'hasOutput' => isset($result['output']),
+        ]);
+        
+        if (!($result['success'] ?? false)) {
+            throw new \Exception("[{$modelName}] Error verificando estado: " . ($result['error'] ?? 'Error desconocido'));
+        }
+        
+        $status = $result['status'] ?? 'unknown';
+        
+        if ($status === 'succeeded') {
+            // ✅ VIDEO LISTO - Procesar resultado
+            Log::info("✅ [{$modelName} REPLICATE] Video completado", ['id' => $generationId]);
+            
+            // Replicate devuelve la URL del video directamente en output
+            $videoUrl = $result['output'] ?? null;
+            
+            if ($videoUrl) {
+                $this->procesarVideoReplicate($videoUrl, $datos);
+            } else {
+                throw new \Exception('No se recibió URL del video de Replicate');
+            }
+            
+        } elseif ($status === 'failed') {
+            // ❌ ERROR - La generación falló
+            $errorMessage = $result['error'] ?? 'Error desconocido en la generación';
+            throw new \Exception("[{$modelName}] Generación fallida: " . $errorMessage);
+            
+        } elseif ($status === 'canceled') {
+            // 🛑 CANCELADO
+            throw new \Exception("[{$modelName}] Generación cancelada");
+            
+        } else {
+            // ⏳ AÚN PENDIENTE (starting, processing)
+            Log::info("⏳ [{$modelName} REPLICATE] Video aún pendiente", [
+                'id' => $generationId,
+                'status' => $status
+            ]);
+            $this->dispatch('videoStillPending', 
+                generationId: $datos['generationId'],
+                prompt: $datos['prompt'],
+                model: $datos['model'],
+                ratio: $datos['ratio'],
+                count: $datos['count']
+            );
+        }
+    }
+    
+    /**
+     * Procesa el video completado de Replicate
+     * 
+     * Replicate devuelve directamente la URL del video generado
+     */
+    /**
+     * Procesa el video completado de Replicate (Veo 3.1)
+     * 
+     * Sigue el mismo formato que procesarVideoVeo2 y procesarVideoLuma
+     * para mantener consistencia con el historial
+     */
+    private function procesarVideoReplicate(string $videoUrl, array $datos): void
+    {
+        try {
+            Log::info('🎬 [REPLICATE] Procesando video completado', [
+                'videoUrl' => $videoUrl,
+                'prompt' => $datos['prompt']
+            ]);
+            
+            // Descargar y guardar en S3
+            $videoContent = file_get_contents($videoUrl);
+            
+            if (!$videoContent) {
+                throw new \Exception('No se pudo descargar el video de Replicate');
+            }
+            
+            // Generar nombre de archivo genérico basado en el modelo
+            $modelPrefix = match($datos['model']) {
+                'veo3.1' => 'veo31',
+                'kling' => 'kling',
+                default => 'replicate'
+            };
+            $fileName = 'genesis/output-videos/' . now()->format('Ymd_His') . '_' . $modelPrefix . '_' . uniqid('video_') . '.mp4';
+            Storage::disk('s3')->put($fileName, $videoContent);
+            $s3Url = Storage::disk('s3')->url($fileName);
+            
+            Log::info('📤 [REPLICATE] Video guardado en S3', [
+                'fileName' => $fileName,
+                's3Url' => $s3Url,
+                'size' => strlen($videoContent)
+            ]);
+            
+            // Preparar estructura de video igual que Veo2/Luma
+            $videoData = [
+                'url' => $s3Url,
+                'prompt' => $datos['prompt'],
+                'model' => $datos['model'],
+                'ratio' => $datos['ratio'],
+                'timestamp' => now()->toISOString()
+            ];
+            
+            $this->results[] = $videoData;
+            $videos = [$videoData];
+            
+            Log::info("🎬 [REPLICATE] Preparando para agregar video al historial", [
+                'video' => $videoData,
+                'prompt' => $datos['prompt'],
+                'model' => $datos['model']
+            ]);
+            
+            // Registrar el uso del video generado (veo3.1 y kling cobran por segundo)
+            $durationSeconds = $datos['durationSeconds'] ?? $this->durationSeconds ?? 4;
+            
+            // Determinar el servicio según el modelo
+            $serviceType = match($datos['model']) {
+                'veo3.1' => 'replicate', // Google via Replicate
+                'kling' => 'replicate', // Kwaivgi via Replicate
+                default => 'replicate'
+            };
+            
+            $this->trackVideoGenerationUsage(
+                $datos['model'], // veo3.1 o kling
+                $durationSeconds,
+                $serviceType,
+                $datos['generationId'] // external_request_id para evitar duplicados
+            );
+            
+            // Disparar evento de finalización - mismo formato que Veo2/Luma
+            $this->dispatch('addToHistory', 
+                type: 'video/generate', 
+                images: $videos,
+                generationId: $datos['generationId'],
+                prompt: $datos['prompt'],
+                model: $this->getModelDisplayName($datos['model']),
+                ratio: $datos['ratio'],
+                count: 1
+            );
+            
+            $this->dispatch('videoGenerationCompleted');
+            $modelName = $this->getModelDisplayName($datos['model']);
+            Log::info("🎉 [REPLICATE] Video {$modelName} agregado exitosamente al historial", [
+                'generationId' => $datos['generationId'],
+                's3Url' => $s3Url,
+                'model' => $datos['model'],
+                'durationSeconds' => $durationSeconds
+            ]);
+            
+        } catch (\Exception $e) {
+            $errorMessage = 'Error procesando video Veo 3.1: ' . $e->getMessage();
+            $this->addError('promptText', $errorMessage);
+            
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+            Log::error('❌ [REPLICATE] Error procesando video', [
+                'error' => $e->getMessage()
+            ]);
+        } finally {
+            $this->isGenerating = false;
         }
     }
 
@@ -1629,6 +3333,88 @@ class VideoGenerator extends Component
     }
 
     /**
+     * Verifica el estado específico de Sora (OpenAI)
+     */
+    private function verificarEstadoSora(string $generationId, array $datos): void
+    {
+        // ✅ Aumentar tiempo de ejecución para consultas a OpenAI
+        ini_set('max_execution_time', 120);
+        
+        Log::info('🎬 Consultando estado de Sora', [
+            'videoId' => $generationId,
+            'model' => $datos['model']
+        ]);
+        
+        $result = \App\Services\OpenAiService::getVideoStatus($generationId);
+        
+        Log::info('📊 Resultado de verificación Sora', [
+            'hasError' => isset($result['error']),
+            'status' => $result['status'] ?? 'unknown',
+            'progress' => $result['progress'] ?? 0,
+            'fullResult' => $result
+        ]);
+        
+        // ❌ Verificar si hay error en la respuesta de la API
+        if (isset($result['error'])) {
+            // El error viene del servicio (error de comunicación o de la API)
+            throw new \Exception($result['error']);
+        }
+        
+        $videoStatus = $result['status'] ?? 'unknown';
+        
+        if ($videoStatus === 'completed') {
+            // ✅ VIDEO LISTO - Procesar resultado
+            Log::info('✅ Video Sora completado', ['id' => $generationId]);
+            // Asegurar que durationSeconds esté en $datos para el tracking
+            if (!isset($datos['durationSeconds'])) {
+                $datos['durationSeconds'] = $this->durationSeconds ?? 4;
+            }
+            $this->procesarVideoSora($result, $datos);
+        } elseif (in_array($videoStatus, ['queued', 'processing', 'in_progress'])) {
+            // ⏳ AÚN PENDIENTE - EMITIR AL FRONTEND PARA NUEVO DELAY
+            Log::info('⏳ Video Sora aún pendiente', [
+                'id' => $generationId,
+                'status' => $videoStatus,
+                'progress' => $result['progress'] ?? 0
+            ]);
+            $this->dispatch('videoStillPending', 
+                generationId: $datos['generationId'],
+                prompt: $datos['prompt'],
+                model: $datos['model'],
+                ratio: $datos['ratio'],
+                count: $datos['count']
+            );
+        } elseif ($videoStatus === 'failed') {
+            // ❌ ERROR EN LA GENERACIÓN
+            // OpenAI puede devolver el mensaje de error en diferentes lugares
+            $errorMessage = 'La generación falló';
+            
+            // Buscar el mensaje de error en diferentes ubicaciones
+            if (isset($result['error']) && is_string($result['error'])) {
+                $errorMessage = $result['error'];
+            } elseif (isset($result['error']['message'])) {
+                $errorMessage = $result['error']['message'];
+            }
+            
+            Log::error('❌ Video Sora falló', [
+                'id' => $generationId,
+                'status' => $videoStatus,
+                'error' => $errorMessage,
+                'fullResult' => $result
+            ]);
+            
+            throw new \Exception($errorMessage);
+        } else {
+            // ❌ ESTADO DESCONOCIDO
+            Log::error('❌ Video Sora estado desconocido', [
+                'id' => $generationId,
+                'status' => $videoStatus
+            ]);
+            throw new \Exception('Estado desconocido: ' . $videoStatus);
+        }
+    }
+
+    /**
      * Verifica el estado genérico para modelos no reconocidos
      */
     private function verificarEstadoGenerico(string $generationId, array $datos): void
@@ -1732,10 +3518,24 @@ class VideoGenerator extends Component
             if (!empty($videos)) {
                 $videoCount = count($videos);
                 
+                // Registrar el uso del video generado (veo2 cobra por segundo)
+                $durationSeconds = $datos['durationSeconds'] ?? $this->durationSeconds ?? 4;
+                // Veo2 puede generar múltiples videos, cada uno con la misma duración
+                $totalSeconds = $videoCount * $durationSeconds;
+                
+                $this->trackVideoGenerationUsage(
+                    'veo2',
+                    $totalSeconds, // Total de segundos de todos los videos generados
+                    'gemini',
+                    $datos['generationId'] // external_request_id para evitar duplicados
+                );
+                
                 Log::info("🎬 Preparando para agregar {$videoCount} video(s) al historial", [
                     'videos' => $videos,
                     'prompt' => $datos['prompt'],
-                    'model' => $datos['model']
+                    'model' => $datos['model'],
+                    'durationSeconds' => $durationSeconds,
+                    'totalSeconds' => $totalSeconds
                 ]);
                 
                 // Disparar evento de finalización
@@ -1851,6 +3651,16 @@ class VideoGenerator extends Component
                 'model' => $datos['model']
             ]);
             
+            // Registrar el uso del video generado (ray2 y ray2-flash cobran por segundo)
+            $durationSeconds = $datos['durationSeconds'] ?? $this->durationSeconds ?? 4;
+            
+            $this->trackVideoGenerationUsage(
+                $datos['model'], // ray2 o ray2-flash
+                $durationSeconds,
+                'luma',
+                $datos['generationId'] // external_request_id para evitar duplicados
+            );
+            
             // Disparar evento de finalización
             $this->dispatch('addToHistory', 
                 type: 'video/generate', 
@@ -1864,7 +3674,8 @@ class VideoGenerator extends Component
             
             $this->dispatch('videoGenerationCompleted');
             Log::info("🎉 Video Luma agregado exitosamente al historial", [
-                'generationId' => $datos['generationId']
+                'generationId' => $datos['generationId'],
+                'durationSeconds' => $durationSeconds
             ]);
             
         } catch (\Exception $e) {
@@ -1962,10 +3773,24 @@ class VideoGenerator extends Component
             if (!empty($videos)) {
                 $videoCount = count($videos);
                 
+                // Registrar el uso del video generado (gen4_turbo cobra por segundo)
+                $durationSeconds = $datos['durationSeconds'] ?? $this->durationSeconds ?? 4;
+                // Runway puede generar múltiples videos, cada uno con la misma duración
+                $totalSeconds = $videoCount * $durationSeconds;
+                
+                $this->trackVideoGenerationUsage(
+                    $datos['model'], // gen4_turbo
+                    $totalSeconds, // Total de segundos de todos los videos generados
+                    'runway',
+                    $datos['generationId'] // external_request_id para evitar duplicados
+                );
+                
                 Log::info("🎬 Preparando para agregar {$videoCount} video(s) al historial", [
                     'videos' => $videos,
                     'prompt' => $datos['prompt'],
-                    'model' => $datos['model']
+                    'model' => $datos['model'],
+                    'durationSeconds' => $durationSeconds,
+                    'totalSeconds' => $totalSeconds
                 ]);
                 
                 // Disparar evento de finalización
@@ -1991,6 +3816,117 @@ class VideoGenerator extends Component
         } catch (\Exception $e) {
             $errorMessage = 'Error procesando video Runway: ' . $e->getMessage();
             $this->addError('promptText', $errorMessage);
+            
+            $this->dispatch('addErrorToList', 
+                message: $errorMessage, 
+                type: 'system', 
+                tool: 'video-generator'
+            );
+            
+            $this->dispatch('videoGenerationError');
+        } finally {
+            $this->isGenerating = false;
+        }
+    }
+
+    /**
+     * Procesa un video completado de Sora (OpenAI)
+     */
+    private function procesarVideoSora(array $response, array $datos): void
+    {
+        try {
+            // ✅ Aumentar tiempo de ejecución para descarga y procesamiento de video
+            ini_set('max_execution_time', 300);
+            
+            Log::info('🎬 Procesando video Sora completado', [
+                'videoId' => $response['id'] ?? 'unknown',
+                'status' => $response['status'] ?? 'unknown',
+                'model' => $datos['model']
+            ]);
+            
+            // Obtener el ID del video
+            $videoId = $response['id'] ?? null;
+            if (!$videoId) {
+                throw new \Exception('No se encontró ID de video en la respuesta de Sora');
+            }
+            
+            // Obtener el contenido binario del video
+            Log::info("📥 Descargando contenido binario del video Sora", ['videoId' => $videoId]);
+            $contentResult = \App\Services\OpenAiService::getVideoContent($videoId);
+            
+            if (isset($contentResult['error'])) {
+                throw new \Exception('Error al obtener contenido del video: ' . $contentResult['error']);
+            }
+            
+            if (!isset($contentResult['binary']) || empty($contentResult['binary'])) {
+                throw new \Exception('No se recibió contenido binario del video');
+            }
+            
+            $videoBinary = $contentResult['binary'];
+            $videoSize = strlen($videoBinary);
+            
+            Log::info("✅ Contenido binario descargado exitosamente", [
+                'videoId' => $videoId,
+                'size' => $videoSize,
+                'sizeKB' => round($videoSize / 1024, 2),
+                'sizeMB' => round($videoSize / 1024 / 1024, 2)
+            ]);
+            
+            // Subir a S3
+            $fileName = 'genesis/output-videos/' . now()->format('Ymd_His') . '_sora_' . uniqid('video_') . '.mp4';
+            Storage::disk('s3')->put($fileName, $videoBinary);
+            $finalUrl = Storage::disk('s3')->url($fileName);
+            
+            Log::info("💾 Video Sora guardado en S3", [
+                'fileName' => $fileName,
+                'finalUrl' => $finalUrl,
+                'size' => $videoSize
+            ]);
+            
+            // Crear datos del video con URL de S3
+            $videoData = [
+                'url' => $finalUrl,
+                'model' => $datos['model'],
+                'ratio' => $datos['ratio'],
+            ];
+            
+            $this->results[] = $videoData;
+            
+            Log::info("✅ Video Sora procesado y subido a S3", [
+                's3Url' => $finalUrl,
+                'videoId' => $videoId
+            ]);
+            
+            Log::info("🎬 Preparando para agregar video Sora al historial", [
+                'video' => $videoData,
+                'prompt' => $datos['prompt'],
+                'model' => $datos['model']
+            ]);
+            
+            // Disparar evento de finalización
+            $this->dispatch('addToHistory', 
+                type: 'video/generate', 
+                images: [$videoData], // Reutilizamos 'images' para compatibilidad
+                generationId: $datos['generationId'],
+                prompt: $datos['prompt'],
+                model: $this->getModelDisplayName($datos['model']),
+                ratio: $datos['ratio'],
+                count: 1
+            );
+            
+            $this->dispatch('videoGenerationCompleted');
+            Log::info("🎉 Video Sora agregado exitosamente al historial", [
+                'generationId' => $datos['generationId']
+            ]);
+            
+        } catch (\Exception $e) {
+            $errorMessage = 'Error procesando video Sora: ' . $e->getMessage();
+            $this->addError('promptText', $errorMessage);
+            
+            Log::error('❌ Error procesando video Sora', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             
             $this->dispatch('addErrorToList', 
                 message: $errorMessage, 
@@ -2078,10 +4014,70 @@ class VideoGenerator extends Component
         }
     }
 
+    /**
+     * Registra el uso de un modelo que cobra por segundo (video)
+     * 
+     * @param string $modelName Nombre del modelo (ej: 'sora-2', 'veo2', 'kling')
+     * @param float $seconds Duración del video en segundos
+     * @param string|null $serviceType Tipo de servicio (ej: 'openai', 'gemini', 'replicate', 'runway', 'luma')
+     * @param string|null $externalRequestId ID externo para evitar duplicados (opcional)
+     */
+    private function trackVideoGenerationUsage(string $modelName, float $seconds, ?string $serviceType = null, ?string $externalRequestId = null): void
+    {
+        // ✅ Usar accountId del componente
+        $userId = Auth::id();
+        
+        if (!$userId) {
+            Log::warning('⚠️ No se pudo obtener userId para registrar uso de generación de video', [
+                'model' => $modelName,
+                'accountId' => $this->accountId
+            ]);
+            return;
+        }
+
+        if ($seconds <= 0) {
+            Log::warning('⚠️ Duración de video inválida', [
+                'model' => $modelName,
+                'seconds' => $seconds
+            ]);
+            return;
+        }
+
+        try {
+            CostCalculationService::trackUsage(
+                $this->accountId,  // ✅ Usar accountId del componente
+                $userId,
+                $modelName,
+                [
+                    'seconds' => $seconds
+                ],
+                null, // usageDate (usa ahora)
+                'Video Generator', // request_type
+                $externalRequestId, // external_request_id (para evitar duplicados)
+                null, // generated_id (no hay Generated para videos simples)
+                null, // step
+                $serviceType // service_type
+            );
+            
+            Log::info('✅ Uso registrado exitosamente para generación de video', [
+                'model' => $modelName,
+                'seconds' => $seconds,
+                'accountId' => $this->accountId,
+                'userId' => $userId
+            ]);
+        } catch (\Exception $e) {
+            Log::error('❌ Error al registrar uso de generación de video', [
+                'model' => $modelName,
+                'seconds' => $seconds,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+        }
+    }
+
     public function render()
     {
         return view('livewire.generador.herramientas.video-generator');
     }
 }
 
-// ✅ Componente VideoGenerator creado exitosamente

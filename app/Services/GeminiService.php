@@ -604,15 +604,20 @@ main();
         ];
         }
     }
-    public static function generateContentImage($prompt, $files = [], $model = "gemini-2.5-flash-image-preview", ?string $aspectRatio = null)
-    {
+    public static function generateContentImage(
+        $prompt,
+        $files = [],
+        $model = "gemini-2.5-flash-image-preview",
+        ?string $aspectRatio = null,
+        ?string $imageSize = null
+    ) {
         try {
             $url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent";
-    
+
             $parts = [
                 ["text" => $prompt]
             ];
-    
+
             if (!empty($files)) {
                 if (!is_array($files)) {
                     $files = [$files];
@@ -625,20 +630,26 @@ main();
                     }
                 }
             }
-    
+
             $data = ["contents" => [["parts" => $parts]]];
 
-            if ($aspectRatio !== null && $aspectRatio !== '') {
-                $data['generationConfig'] = [
-                    'responseModalities' => ['TEXT', 'IMAGE'],
-                    'imageConfig' => [
-                        'aspectRatio' => $aspectRatio,
-                    ],
-                ];
+            $generationConfig = [
+                "responseModalities" => ["TEXT", "IMAGE"],
+            ];
+            if ($aspectRatio !== null || $imageSize !== null) {
+                $imageConfig = [];
+                if ($aspectRatio !== null) {
+                    $imageConfig["aspectRatio"] = $aspectRatio;
+                }
+                if ($imageSize !== null) {
+                    $imageConfig["imageSize"] = $imageSize;
+                }
+                $generationConfig["imageConfig"] = $imageConfig;
             }
+            $data["generationConfig"] = $generationConfig;
 
             $data_string = json_encode($data);
-    
+
             $ch = curl_init();
             curl_setopt($ch, CURLOPT_URL, $url);
             curl_setopt($ch, CURLOPT_HTTPHEADER, [
@@ -649,15 +660,17 @@ main();
             curl_setopt($ch, CURLOPT_POSTFIELDS, $data_string);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    
+            curl_setopt($ch, CURLOPT_TIMEOUT, 180);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 60);
+
             $response = curl_exec($ch);
             if ($response === false) throw new \Exception('Error cURL: ' . curl_error($ch));
             curl_close($ch);
-    
+
             $response_data = json_decode($response, true);
             if (json_last_error() !== JSON_ERROR_NONE) throw new \Exception('Error JSON: ' . json_last_error_msg());
-            if (isset($response_data['error'])) throw new \Exception('API Gemini: ' . $response_data['error']['message']);
-    
+            if (isset($response_data['error'])) throw new \Exception('API Gemini: ' . ($response_data['error']['message'] ?? json_encode($response_data['error'])));
+
             $images = [];
             foreach ($response_data['candidates'] ?? [] as $candidate) {
                 foreach ($candidate['content']['parts'] ?? [] as $part) {
@@ -669,14 +682,17 @@ main();
                     }
                 }
             }
-    
+
             if (empty($images)) throw new \Exception('No se encontró imagen en la respuesta de Gemini.');
-    
+
+            $usageMetadata = $response_data['usageMetadata'] ?? null;
+
             return [
                 'success' => true,
-                'data' => $images
+                'data' => $images,
+                'usageMetadata' => $usageMetadata
             ];
-    
+
         } catch (\Exception $e) {
             return [
                 'success' => false,

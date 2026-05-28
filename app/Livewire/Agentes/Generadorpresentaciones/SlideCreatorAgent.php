@@ -2,14 +2,22 @@
 
 namespace App\Livewire\Agentes\Generadorpresentaciones;
 
+use App\Http\Traits\ValidatesCreditLimit;
+use App\Models\Account;
 use App\Models\Generated;
+use App\Supports\CostCalculationService;
 use Livewire\Component;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 
 class SlideCreatorAgent extends Component
 {
+    use ValidatesCreditLimit;
+
+    protected string $toolName = 'Generador de Presentaciones';
+
     // Propiedades públicas
     public $conversations = []; // Historial de conversaciones
     public $currentConversationId = null; // ID de la conversación actual
@@ -21,6 +29,15 @@ class SlideCreatorAgent extends Component
     public $isGenerating = false; // Indicador de generación en proceso
     public $currentPresentation = null; // Presentación actual en vista
     public $sidebarOpen = true; // Estado del sidebar (para móvil)
+
+    /** Cuenta seleccionada para créditos y uso */
+    public ?int $selectedAccountId = null;
+
+    /** Cuentas disponibles según rol */
+    public array $availableAccounts = [];
+
+    /** Super admin: ve todas las cuentas activas */
+    public bool $isSuperAdmin = false;
 
     // Modo de generación
     public $generationMode = 'scratch'; // 'template' o 'scratch' (por defecto: sin plantilla)
@@ -72,8 +89,88 @@ class SlideCreatorAgent extends Component
      */
     public function mount()
     {
+        $this->initializeAccountSelection();
         $this->loadGenesisDocuments();
         $this->loadConversations();
+    }
+
+    /**
+     * Inicializa el selector de cuenta (igual que GeneradorMain)
+     */
+    private function initializeAccountSelection(): void
+    {
+        $user = Auth::user();
+        if (!$user) {
+            return;
+        }
+
+        $this->isSuperAdmin = $user->haveFullAccess();
+
+        if ($this->isSuperAdmin) {
+            $this->availableAccounts = Account::select('id', 'name')
+                ->where('status', 1)
+                ->orderBy('name')
+                ->get()
+                ->map(fn ($account) => ['id' => $account->id, 'name' => $account->name])
+                ->toArray();
+
+            $sessionAccountId = session('presentaciones.selectedAccountId')
+                ?? session('generador.selectedAccountId');
+
+            if ($sessionAccountId && collect($this->availableAccounts)->pluck('id')->contains($sessionAccountId)) {
+                $this->selectedAccountId = (int) $sessionAccountId;
+            }
+        } else {
+            $this->availableAccounts = $user->accounts()
+                ->select('id', 'name')
+                ->where('status', 1)
+                ->orderBy('name')
+                ->get()
+                ->map(fn ($account) => ['id' => $account->id, 'name' => $account->name])
+                ->toArray();
+
+            if (!empty($this->availableAccounts)) {
+                $sessionAccountId = session('presentaciones.selectedAccountId')
+                    ?? session('generador.selectedAccountId');
+
+                if ($sessionAccountId && collect($this->availableAccounts)->pluck('id')->contains($sessionAccountId)) {
+                    $this->selectedAccountId = (int) $sessionAccountId;
+                } else {
+                    $this->selectedAccountId = $this->availableAccounts[0]['id'];
+                }
+            }
+        }
+
+        if ($this->selectedAccountId) {
+            session([
+                'presentaciones.selectedAccountId' => $this->selectedAccountId,
+                'generador.selectedAccountId' => $this->selectedAccountId,
+            ]);
+        }
+    }
+
+    public function updatedSelectedAccountId($value): void
+    {
+        if ($value) {
+            $hasAccess = $this->isSuperAdmin
+                || collect($this->availableAccounts)->pluck('id')->contains((int) $value);
+
+            if (!$hasAccess) {
+                $this->addError('No tienes acceso a esta cuenta', 'validación');
+                $this->selectedAccountId = session('presentaciones.selectedAccountId');
+                return;
+            }
+        }
+
+        session([
+            'presentaciones.selectedAccountId' => $value,
+            'generador.selectedAccountId' => $value,
+        ]);
+
+        Log::info('Cuenta seleccionada en presentaciones', [
+            'user_id' => Auth::id(),
+            'account_id' => $value,
+        ]);
     }
 
     // Métodos para gestión de errores
@@ -113,9 +210,27 @@ class SlideCreatorAgent extends Component
             return;
         }
 
+        if (empty($this->availableAccounts)) {
+            $this->addError(
+                $this->isSuperAdmin
+                    ? 'No hay cuentas activas en el sistema.'
+                    : 'No tienes cuentas asignadas. Contacta al administrador.',
+                'validación'
+            );
+            return;
+        }
+
+        if (!$this->selectedAccountId) {
+            $this->addError('Selecciona una cuenta antes de generar la presentación.', 'validación');
+            return;
+        }
+
         $this->isGenerating = true;
 
         try {
+            $accountId = $this->getAccountId();
+            $this->validateCreditLimit($accountId);
+
             // Preparar el prompt final
             $finalPrompt = '';
 
@@ -228,6 +343,13 @@ class SlideCreatorAgent extends Component
                 genesisDocName: $this->genesisDocInfo['name'] ?? null
             );
 
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            Log::warning('Límite de créditos excedido en generatePresentation', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null,
+            ]);
+            $this->isGenerating = false;
+            $this->addError($e->getMessage(), 'validación');
         } catch (\Exception $e) {
             \Log::error('Excepción generando presentación', [
                 'error' => $e->getMessage(),
@@ -488,6 +610,13 @@ class SlideCreatorAgent extends Component
                                 'status' => 'completed'
                             ],
                         ]);
+
+                        if (isset($data['credits']['deducted']) && $data['credits']['deducted'] > 0) {
+                            $this->trackGammaUsage(
+                                (int) $data['credits']['deducted'],
+                                $generationId
+                            );
+                        }
                         
                         // Recargar conversaciones para actualizar UI con los datos de DB
                         $this->loadConversations();
@@ -985,12 +1114,74 @@ class SlideCreatorAgent extends Component
             ],
             'is_visible' => true,
         ]);
+
+        if (isset($gammaData['credits']['deducted']) && $gammaData['credits']['deducted'] > 0) {
+            $this->trackGammaUsage(
+                (int) $gammaData['credits']['deducted'],
+                $gammaData['generationId'] ?? null
+            );
+        }
         
         return [
             'conversation' => $conversation,
             'message' => $message,
             'presentation_id' => $presentationId
         ];
+    }
+
+    /**
+     * Obtiene el accountId del usuario autenticado
+     */
+    private function getAccountId(): ?int
+    {
+        return $this->selectedAccountId ? (int) $this->selectedAccountId : null;
+    }
+
+    /**
+     * Registra el uso de Gamma en usage_records
+     */
+    private function trackGammaUsage(int $creditsDeducted, ?string $externalRequestId = null): void
+    {
+        $accountId = $this->getAccountId();
+        $userId = Auth::id();
+
+        if (!$userId) {
+            Log::warning('No se pudo obtener userId para registrar uso de Gamma', [
+                'credits' => $creditsDeducted,
+                'accountId' => $accountId,
+            ]);
+            return;
+        }
+
+        if ($creditsDeducted <= 0) {
+            return;
+        }
+
+        try {
+            CostCalculationService::trackUsage(
+                $accountId,
+                $userId,
+                'gamma-app',
+                ['credits' => $creditsDeducted],
+                null,
+                'Presentaciones',
+                $externalRequestId,
+                null,
+                null,
+                'gamma'
+            );
+
+            Log::info('Uso de Gamma registrado', [
+                'credits' => $creditsDeducted,
+                'accountId' => $accountId,
+                'generationId' => $externalRequestId,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error al registrar uso de Gamma', [
+                'credits' => $creditsDeducted,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     #[Layout('layouts.app')]
