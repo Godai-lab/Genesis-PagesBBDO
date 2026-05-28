@@ -25,6 +25,10 @@ use App\Http\Controllers\SiteController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\ValidarConceptoController;
+use App\Http\Controllers\ProviderController;
+use App\Http\Controllers\AiModelController;
+use App\Http\Controllers\ModelPricingController;
+use App\Http\Controllers\UsageRecordController;
 use App\Livewire\Generador\GeneradorMain;
 use App\Livewire\Agentes\Generadorpresentaciones\SlideCreatorAgent;
 use Illuminate\Support\Facades\Route;
@@ -68,6 +72,8 @@ Route::get('/terms_and_conditions', function () {
 Route::get('/dashboard', [DashboardController::class, 'index'])->middleware(['auth','verified','subscription'])->name('dashboard');
 
 Route::middleware(['auth','subscription'])->group(function () {
+    Route::get('/mis-creditos', \App\Livewire\Costs\Credits\UserCreditsUsage::class)->name('user.credits');
+
     Route::get('/asistentes', function () {
         return view('asistentes');
     })->name('asistentes');
@@ -214,6 +220,24 @@ Route::middleware(['auth','subscription'])->group(function () {
     // Página del nuevo contenedor de herramientas (Livewire 3)
     Route::get('/generador/{tool?}', GeneradorMain::class)->name('generador.main');
     Route::get('/asistente-presentaciones', SlideCreatorAgent::class)->name('slidegenerador.main');
+
+    // Gestión de proveedores, modelos, precios y métricas de uso
+    Route::prefix('costs')->group(function () {
+        Route::resource('providers', ProviderController::class);
+        Route::resource('ai-models', AiModelController::class);
+        Route::resource('model-pricing', ModelPricingController::class);
+        Route::get('usage-records/detail/{userId}/{accountId}', \App\Livewire\Costs\UsageMetricsDetail::class)->name('usage-records.detail');
+        Route::get('usage-records', [UsageRecordController::class, 'index'])->name('usage-records.index');
+        Route::get('usage-records/{id}', [UsageRecordController::class, 'show'])->name('usage-records.show');
+        Route::get('usage-metrics', \App\Livewire\Costs\UsageMetrics::class)->name('usage-metrics');
+
+        Route::get('creditos-cuentas', \App\Livewire\Costs\Credits\ManageAccountCredits::class)
+            ->middleware('can:haveaccess,costs.account-credits')
+            ->name('costs.account-credits');
+        Route::get('creditos-cuentas/{accountId}', \App\Livewire\Costs\Credits\AccountCreditDetail::class)
+            ->middleware('can:haveaccess,costs.account-credits')
+            ->name('costs.credits.detail');
+    });
 });
 
 Route::get('subscribe', [SubscriptionController::class, 'show'])->name('subscription.show');

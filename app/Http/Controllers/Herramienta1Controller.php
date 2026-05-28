@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use App\Models\Account;
 use App\Models\Brand;
 use App\Models\Field;
@@ -11,13 +12,89 @@ use App\Services\GeminiService;
 use App\Services\OpenAiService;
 use App\Services\ProcessFileContentService;
 use App\Services\PerplexityService;
+use App\Supports\CostCalculationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
 
 class Herramienta1Controller extends Controller
 {
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Herramienta 1 - Brief';
+    
+    // Modelos utilizados por cada funcionalidad (para registro de uso)
+    private const MODEL_GEMINI_FLASH = 'gemini-2.5-flash';
+    private const MODEL_PERPLEXITY_REASONING = 'sonar-reasoning-pro';
+    
+    /**
+     * Método auxiliar para registrar el uso de tokens de manera consistente
+     * 
+     * @param int $accountId ID de la cuenta
+     * @param string $model Nombre del modelo usado (ej: 'gemini-2.5-flash', 'sonar-reasoning')
+     * @param array $usageData Datos de uso del servicio
+     * @param string $serviceType Tipo de servicio: 'gemini', 'perplexity'
+     * @param string $context Contexto de la llamada para logs (ej: 'datosextras', 'GenerarBrief')
+     * @param int|null $generatedId ID de la generación (Generated) para agrupar procesos
+     * @return void
+     */
+    private function trackUsageIfAvailable($accountId, $model, $usageData, $serviceType, $context = '', $generatedId = null)
+    {
+        try {
+            $inputTokens = 0;
+            $outputTokens = 0;
+            
+            // Extraer tokens según el tipo de servicio
+            if ($serviceType === 'gemini' && isset($usageData['promptTokenCount']) && isset($usageData['candidatesTokenCount'])) {
+                $inputTokens = $usageData['promptTokenCount'];
+                $outputTokens = $usageData['candidatesTokenCount'];
+            } elseif ($serviceType === 'perplexity' && isset($usageData['prompt_tokens']) && isset($usageData['completion_tokens'])) {
+                $inputTokens = $usageData['prompt_tokens'];
+                $outputTokens = $usageData['completion_tokens'];
+            }
+            
+            // Solo registrar si hay tokens
+            if ($inputTokens > 0 || $outputTokens > 0) {
+                // Agregar sufijo "-Brief" para identificar que es de Herramienta1
+                $requestType = $context ? $context . '-Brief' : 'Brief';
+                
+                CostCalculationService::trackUsage(
+                    $accountId,
+                    auth()->id(),
+                    $model,
+                    [
+                        'tokens' => [
+                            'input' => $inputTokens,
+                            'output' => $outputTokens
+                        ]
+                    ],
+                    Carbon::now(),
+                    $requestType,
+                    null, // external_request_id
+                    $generatedId, // generated_id
+                    $context, // step
+                    $serviceType // service_type
+                );
+                
+                Log::info("✅ Uso registrado exitosamente", [
+                    'context' => $context,
+                    'model' => $model,
+                    'input_tokens' => $inputTokens,
+                    'output_tokens' => $outputTokens,
+                    'generated_id' => $generatedId
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::error("⚠️ Error al registrar uso en {$context}", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            // No lanzamos la excepción para no interrumpir el flujo
+        }
+    }
+
     var $objetivos = [
         ['id' => 'Lanzamiento', 'name' => 'Lanzamiento'],
         ['id' => 'Posicionamiento', 'name' => 'Posicionamiento'],
@@ -194,11 +271,36 @@ public function datosextras(Request $request){
             $prompt .= "Usando este esquema JSON:\n";
             $prompt .= 'Respuesta={"extraMarca": str, "extraProductos": str, "extraCompetencia": str, "extraEstudiosMercado": str, "extraCiudadPaisEconomia": str, "extraNecesidades": str}';
 
-            $model = "gemini-2.5-flash";
+            $model = self::MODEL_GEMINI_FLASH;
             $temperature = 0.25;
             $response_mime_type = "application/json";
 
             $response = GeminiService::TextOnlyEntry($prompt,$model,$temperature, $response_mime_type);
+            
+            // Log de depuración para ver qué devuelve Gemini
+            Log::info('Respuesta completa Gemini (datosextras)', [
+                'account_id' => $accountId,
+                'response_keys' => array_keys($response),
+                'has_usageMetadata' => isset($response['usageMetadata'])
+            ]);
+            
+            // Log de tokens Gemini
+            if(isset($response['usageMetadata'])) {
+                Log::info('Usage tokens Gemini (datosextras)', [
+                    'account_id' => $accountId,
+                    'usage' => $response['usageMetadata']
+                ]);
+                
+                // Registrar uso de tokens si está disponible y el proceso fue exitoso
+                if (isset($response['data']) && !isset($response['error'])) {
+                    $this->trackUsageIfAvailable($accountId, $model, $response['usageMetadata'], 'gemini', 'datosextras');
+                }
+            } else {
+                Log::warning('No se encontró usageMetadata en respuesta Gemini (datosextras)', [
+                    'account_id' => $accountId,
+                    'response_keys' => array_keys($response)
+                ]);
+            }
 
             $response = json_decode($response['data'],true);
 
@@ -304,53 +406,57 @@ public function datosextras(Request $request){
     }
 
     public function GenerarBrief($accountId){
-        $accountData = Field::where('account_id', $accountId)->pluck('value', 'key');
+        try {
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+            
+            $accountData = Field::where('account_id', $accountId)->pluck('value', 'key');
 
-        $country = $accountData->get('country');
-        $name = $accountData->get('name');
-        $slogan = $accountData->get('slogan');
-        $mission = $accountData->get('mission');
-        $vision = $accountData->get('vision');
-        $valores = $accountData->get('valores');
-        $por_que_existe_tu_marca = $accountData->get('por_que_existe_tu_marca');
-        $fundacion_marca = $accountData->get('fundacion_marca');
-        $hitos_marca = $accountData->get('hitos_marca');
-        $diferencia_marca = $accountData->get('diferencia_marca');
-        $tono_de_voz = $accountData->get('tono_de_voz');
-        $situacion_lugar_marca = $accountData->get('situacion_lugar_marca');
-        $archetype = $accountData->get('archetype');
-        $tendencias_mercado = $accountData->get('tendencias_mercado');
-        $tamano_mercado_y_segmentacion = $accountData->get('tamano_mercado_y_segmentacion');
-        $competidores_marca = $accountData->get('competidores_marca');
-        $analisis_FODA_competencia = $accountData->get('analisis_FODA_competencia');
-        $edad_genero_ubicacion_ingresos_publico_objetivo = $accountData->get('edad_genero_ubicacion_ingresos_publico_objetivo');
-        $intereses_valores_estilo_vida_publico_objetivo = $accountData->get('intereses_valores_estilo_vida_publico_objetivo');
-        $habitos_compra_lealtad_publico_objetivo = $accountData->get('habitos_compra_lealtad_publico_objetivo');
-        $como_utilizan_tu_producto = $accountData->get('como_utilizan_tu_producto');
-        $cuando_utilizan_tu_producto = $accountData->get('cuando_utilizan_tu_producto');
-        $puntos_contacto_cliente_marca = $accountData->get('puntos_contacto_cliente_marca');
-        $canales_comunican_interactuan_marca = $accountData->get('canales_comunican_interactuan_marca');
-        $extraMarca = $accountData->get('extraMarca');
-        $extraProductos = $accountData->get('extraProductos');
-        $extraCompetencia = $accountData->get('extraCompetencia');
-        $extraEstudiosMercado = $accountData->get('extraEstudiosMercado');
-        $extraCiudadPaisEconomia = $accountData->get('extraCiudadPaisEconomia');
-        $extraNecesidades = $accountData->get('extraNecesidades');
+            $country = $accountData->get('country');
+            $name = $accountData->get('name');
+            $slogan = $accountData->get('slogan');
+            $mission = $accountData->get('mission');
+            $vision = $accountData->get('vision');
+            $valores = $accountData->get('valores');
+            $por_que_existe_tu_marca = $accountData->get('por_que_existe_tu_marca');
+            $fundacion_marca = $accountData->get('fundacion_marca');
+            $hitos_marca = $accountData->get('hitos_marca');
+            $diferencia_marca = $accountData->get('diferencia_marca');
+            $tono_de_voz = $accountData->get('tono_de_voz');
+            $situacion_lugar_marca = $accountData->get('situacion_lugar_marca');
+            $archetype = $accountData->get('archetype');
+            $tendencias_mercado = $accountData->get('tendencias_mercado');
+            $tamano_mercado_y_segmentacion = $accountData->get('tamano_mercado_y_segmentacion');
+            $competidores_marca = $accountData->get('competidores_marca');
+            $analisis_FODA_competencia = $accountData->get('analisis_FODA_competencia');
+            $edad_genero_ubicacion_ingresos_publico_objetivo = $accountData->get('edad_genero_ubicacion_ingresos_publico_objetivo');
+            $intereses_valores_estilo_vida_publico_objetivo = $accountData->get('intereses_valores_estilo_vida_publico_objetivo');
+            $habitos_compra_lealtad_publico_objetivo = $accountData->get('habitos_compra_lealtad_publico_objetivo');
+            $como_utilizan_tu_producto = $accountData->get('como_utilizan_tu_producto');
+            $cuando_utilizan_tu_producto = $accountData->get('cuando_utilizan_tu_producto');
+            $puntos_contacto_cliente_marca = $accountData->get('puntos_contacto_cliente_marca');
+            $canales_comunican_interactuan_marca = $accountData->get('canales_comunican_interactuan_marca');
+            $extraMarca = $accountData->get('extraMarca');
+            $extraProductos = $accountData->get('extraProductos');
+            $extraCompetencia = $accountData->get('extraCompetencia');
+            $extraEstudiosMercado = $accountData->get('extraEstudiosMercado');
+            $extraCiudadPaisEconomia = $accountData->get('extraCiudadPaisEconomia');
+            $extraNecesidades = $accountData->get('extraNecesidades');
 
-        
-        // Decodificar los datos del producto
-        $products = json_decode($accountData->get('product'), true);
+            
+            // Decodificar los datos del producto
+            $products = json_decode($accountData->get('product'), true);
 
-        // Generar la parte de productos del prompt
-        $productosTexto = '';
-        foreach ($products as $product) {
-            $product_name = $product['product_name'];
-            $product_slogan = $product['product_slogan'];
-            $presentaciones = $product['presentaciones'];
-            $characteristics = implode("\nCaracterística: ", $product['product_characteristics']);
-            $benefits = implode("\nBeneficio: ", $product['product_benefits']);
+            // Generar la parte de productos del prompt
+            $productosTexto = '';
+            foreach ($products as $product) {
+                $product_name = $product['product_name'];
+                $product_slogan = $product['product_slogan'];
+                $presentaciones = $product['presentaciones'];
+                $characteristics = implode("\nCaracterística: ", $product['product_characteristics']);
+                $benefits = implode("\nBeneficio: ", $product['product_benefits']);
 
-            $productosTexto .= <<<EOT
+                $productosTexto .= <<<EOT
 Producto
 Nombre del producto: $product_name
 Slogan: $product_slogan
@@ -361,9 +467,9 @@ Beneficios:
 Beneficio: $benefits
 
 EOT;
-        }
+            }
 
-        $prompt = <<<EOT
+            $prompt = <<<EOT
 Analiza la información proporcionada por el usuario en el formulario y el documento adicional. Reorganiza y mejora los datos para crear un brief completo y estandarizado, siguiendo este formato:
 Información de la marca:
 País
@@ -455,12 +561,50 @@ extrae lo más importante y necesario para mejorar el brief y añadelo en el ITE
 Presenta el brief final en un formato claro y fácil de leer, utilizando viñetas y numeración donde sea apropiado. NO añadas ninguna nota adicional al inicio o final. Responde siempre en español.
 EOT;
 
-        $model = "gemini-2.5-flash";
-        $temperature = 0.25;
-        $response_mime_type = "text/plain";
-        $response = GeminiService::TextOnlyEntry($prompt,$model,$temperature, $response_mime_type);
+            $model = self::MODEL_GEMINI_FLASH;
+            $temperature = 0.25;
+            $response_mime_type = "text/plain";
+            $response = GeminiService::TextOnlyEntry($prompt,$model,$temperature, $response_mime_type);
+            
+            // Log de tokens Gemini
+            if(isset($response['usageMetadata'])) {
+                Log::info('Usage tokens Gemini (GenerarBrief)', [
+                    'account_id' => $accountId,
+                    'usage' => $response['usageMetadata']
+                ]);
+                
+                // Registrar uso de tokens si está disponible y el proceso fue exitoso
+                if (isset($response['data']) && !isset($response['error'])) {
+                    $this->trackUsageIfAvailable($accountId, $model, $response['usageMetadata'], 'gemini', 'GenerarBrief');
+                }
+            }
 
-        return $response;
+            return $response;
+            
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en GenerarBrief', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId
+            ]);
+
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        } catch (\Exception $e) {
+            // Otros errores - mostrar mensaje genérico
+            Log::error('Error al generar Brief', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId,
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return [
+                'success' => false,
+                'error' => 'Ha ocurrido un error al generar el Brief. Por favor, intenta nuevamente.',
+            ];
+        }
     }  
 
 
@@ -495,164 +639,168 @@ ini_set('max_execution_time', 600);
     $accountId = $request->input('account');
     $id_generated = $request->input('id_generated');
 
-    $metadata = [
-        'country' => $request->input('country'),
-        'name' => $request->input('name'),
-        'slogan' => $request->input('slogan'),
-        'started_at' => now()->toISOString(),
-        'step' => 2,
-    ];
+    try {
+        // Validar límite de créditos antes de generar
+        $this->validateCreditLimit($accountId);
 
-    if($id_generated){
-        $generated = Generated::find($id_generated);
-        if (!$generated) {
-            return response()->json([
-                'success' => false,
-                'error' => 'Generación no encontrada '.$id_generated
-                ]);
-            }
-    }else{
-        $generated = Generated::create([
-            'account_id' => $accountId,
-            'key' => 'Brief',
-            'name' => 'Brief en proceso - ' . $request->input('name'),
-            'value' => '<div class="text-center p-4"><div class="spinner-border" role="status"></div><p class="mt-2">Generando Brief...</p></div>',
-            'rating' => null,
-            'status' => 'processing', // Nuevo campo para el estado
-            'metadata' => json_encode($metadata)
-        ]);
-    }
-    
-    // Filtramos los parámetros para excluir _token y account
-    // $parameters = $request->except('_token', 'account', 'urls', 'files');
+        $metadata = [
+            'country' => $request->input('country'),
+            'name' => $request->input('name'),
+            'slogan' => $request->input('slogan'),
+            'started_at' => now()->toISOString(),
+            'step' => 2,
+        ];
 
-    // try {
-    //     foreach ($parameters as $key => $value) {
-    //         // Si el valor es un array, lo convertimos a JSON para guardarlo
-    //         if (is_array($value)) {
-    //             $value = json_encode($value);
-    //         }
-    //         // Actualizar o crear el registro en una sola línea
-    //         Field::updateOrCreate(
-    //             ['key' => $key, 'account_id' => $accountId],
-    //             ['value' => $value]
-    //         );
-    //     }
-    // } catch (\Exception $e) {
-    //     Log::error('Error al guardar parámetros en la base de datos', [
-    //         'exception' => $e->getMessage(),
-    //         'parameters' => $parameters
-    //     ]);
-    //     return response()->json(['error' => 'Error al guardar los datos del formulario.'], 500);
-    // }
-
-    // Obtener las URLs y los archivos validados, filtrando los vacíos
-    $urls = array_filter($request->input('urls', []), function ($url) {
-        return !empty($url);
-    });
-    $files = array_filter($request->file('files', []), function ($file) {
-        return $file && $file->isValid();
-    });
-    $investigation = array_filter($request->input('investigation', []), function ($investigation) {
-        return !empty($investigation);
-    });
-
-    // Validar que al menos una URL o un archivo se esté enviando
-    if (empty($urls) && empty($files) && empty($investigation)) {
-        Log::warning('No se envió ninguna URL ni archivo ni investigación');
-        return response()->json(['error' => 'Debes enviar al menos una URL o un archivo o una investigación.']);
-    }
-
-    $contentSite = [];
-    $contentFile = [];
-    $contentInvestigation = [];
-
-    // Procesar URLs si existen
-    if (!empty($urls)) {
-        foreach ($urls as $url) {
-            try {
-                Log::info('Procesando URL', ['url' => $url]);
-                $siteContent = ProcessFileContentService::processUrl($url);
-                $contentSite[] = $siteContent;
-            } catch (\Exception $e) {
-                Log::error('Error al procesar la URL', [
-                    'url' => $url,
-                    'exception' => $e->getMessage()
-                ]);
-            }
-        }
-    }
-
-    // Procesar archivos si existen
-    if (!empty($files)) {
-        foreach ($files as $file) {
-            try {
-                $filePath = $file->getPathname();
-                $fileType = $file->getClientMimeType();
-                Log::info('Procesando archivo', [
-                    'original_name' => $file->getClientOriginalName(),
-                    'mime_type' => $fileType
-                ]);
-
-                switch ($fileType) {
-                    case 'application/pdf':
-                        $fileContent = ProcessFileContentService::processPdf($filePath);
-                        break;
-                    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-                    case 'application/msword':
-                        $fileContent = ProcessFileContentService::processWord($filePath);
-                        break;
-                    case 'application/vnd.ms-excel':
-                    case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-                        $fileContent = ProcessFileContentService::processExcel($filePath);
-                        break;
-                    case 'text/csv':
-                        $fileContent = ProcessFileContentService::processCSV($filePath);
-                        break;
-                    case 'text/plain':
-                        $fileContent = ProcessFileContentService::processTxt($filePath);
-                        break;
-                    default:
-                        $fileContent = "Tipo de archivo no soportado: " . $fileType;
-                        Log::warning('Tipo de archivo no soportado', ['mime_type' => $fileType]);
+        if($id_generated){
+            $generated = Generated::find($id_generated);
+            if (!$generated) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'Generación no encontrada'
+                    ]);
                 }
-                $contentFile[] = $fileContent;
-            } catch (\Exception $e) {
-                Log::error('Error al procesar el archivo', [
-                    'file' => $file->getClientOriginalName(),
-                    'exception' => $e->getMessage()
-                ]);
+        }else{
+            $generated = Generated::create([
+                'account_id' => $accountId,
+                'key' => 'Brief',
+                'name' => 'Brief en proceso - ' . $request->input('name'),
+                'value' => '<div class="text-center p-4"><div class="spinner-border" role="status"></div><p class="mt-2">Generando Brief...</p></div>',
+                'rating' => null,
+                'status' => 'processing', // Nuevo campo para el estado
+                'metadata' => json_encode($metadata)
+            ]);
+        }
+    
+        // Filtramos los parámetros para excluir _token y account
+        // $parameters = $request->except('_token', 'account', 'urls', 'files');
+
+        // try {
+        //     foreach ($parameters as $key => $value) {
+        //         // Si el valor es un array, lo convertimos a JSON para guardarlo
+        //         if (is_array($value)) {
+        //             $value = json_encode($value);
+        //         }
+        //         // Actualizar o crear el registro en una sola línea
+        //         Field::updateOrCreate(
+        //             ['key' => $key, 'account_id' => $accountId],
+        //             ['value' => $value]
+        //         );
+        //     }
+        // } catch (\Exception $e) {
+        //     Log::error('Error al guardar parámetros en la base de datos', [
+        //         'exception' => $e->getMessage(),
+        //         'parameters' => $parameters
+        //     ]);
+        //     return response()->json(['error' => 'Error al guardar los datos del formulario.'], 500);
+        // }
+
+        // Obtener las URLs y los archivos validados, filtrando los vacíos
+        $urls = array_filter($request->input('urls', []), function ($url) {
+            return !empty($url);
+        });
+        $files = array_filter($request->file('files', []), function ($file) {
+            return $file && $file->isValid();
+        });
+        $investigation = array_filter($request->input('investigation', []), function ($investigation) {
+            return !empty($investigation);
+        });
+
+        // Validar que al menos una URL o un archivo se esté enviando
+        if (empty($urls) && empty($files) && empty($investigation)) {
+            Log::warning('No se envió ninguna URL ni archivo ni investigación');
+            return response()->json(['error' => 'Debes enviar al menos una URL o un archivo o una investigación.']);
+        }
+
+        $contentSite = [];
+        $contentFile = [];
+        $contentInvestigation = [];
+
+        // Procesar URLs si existen
+        if (!empty($urls)) {
+            foreach ($urls as $url) {
+                try {
+                    Log::info('Procesando URL', ['url' => $url]);
+                    $siteContent = ProcessFileContentService::processUrl($url);
+                    $contentSite[] = $siteContent;
+                } catch (\Exception $e) {
+                    Log::error('Error al procesar la URL', [
+                        'url' => $url,
+                        'exception' => $e->getMessage()
+                    ]);
+                }
             }
         }
-    }
 
-    if (!empty($investigation)) {
-        foreach ($investigation as $investigationID) {
-            $investigationContent = Generated::find($investigationID);
-            if (!$investigationContent) {
-                Log::error('Investigación no encontrada', ['investigation_id' => $investigationID]);
-                continue;
+        // Procesar archivos si existen
+        if (!empty($files)) {
+            foreach ($files as $file) {
+                try {
+                    $filePath = $file->getPathname();
+                    $fileType = $file->getClientMimeType();
+                    Log::info('Procesando archivo', [
+                        'original_name' => $file->getClientOriginalName(),
+                        'mime_type' => $fileType
+                    ]);
+
+                    switch ($fileType) {
+                        case 'application/pdf':
+                            $fileContent = ProcessFileContentService::processPdf($filePath);
+                            break;
+                        case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+                        case 'application/msword':
+                            $fileContent = ProcessFileContentService::processWord($filePath);
+                            break;
+                        case 'application/vnd.ms-excel':
+                        case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+                            $fileContent = ProcessFileContentService::processExcel($filePath);
+                            break;
+                        case 'text/csv':
+                            $fileContent = ProcessFileContentService::processCSV($filePath);
+                            break;
+                        case 'text/plain':
+                            $fileContent = ProcessFileContentService::processTxt($filePath);
+                            break;
+                        default:
+                            $fileContent = "Tipo de archivo no soportado: " . $fileType;
+                            Log::warning('Tipo de archivo no soportado', ['mime_type' => $fileType]);
+                    }
+                    $contentFile[] = $fileContent;
+                } catch (\Exception $e) {
+                    Log::error('Error al procesar el archivo', [
+                        'file' => $file->getClientOriginalName(),
+                        'exception' => $e->getMessage()
+                    ]);
+                }
             }
-            $contentInvestigation[] = $investigationContent->value;
         }
-    }
 
-    $country = $request->input('country');
-    $name = $request->input('name');
-    $slogan = $request->input('slogan');
-    $callperplexity= $this->callPerplexity($country, $name, $slogan);
-    $fuentes=$callperplexity['fuentes'];
-    $fuentesFormatted = !empty($fuentes) ? "- " . implode("\n- ", $fuentes) : "No se encontraron fuentes.";
-    
-    if (!is_array($callperplexity) || isset($callperplexity['error'])) {
-        // No hay error en la respuesta
-    } 
-    $callperplexity = preg_replace('/<think>.*?<\/think>/s', '', $callperplexity['data']);
-    
+        if (!empty($investigation)) {
+            foreach ($investigation as $investigationID) {
+                $investigationContent = Generated::find($investigationID);
+                if (!$investigationContent) {
+                    Log::error('Investigación no encontrada', ['investigation_id' => $investigationID]);
+                    continue;
+                }
+                $contentInvestigation[] = $investigationContent->value;
+            }
+        }
+
+        $country = $request->input('country');
+        $name = $request->input('name');
+        $slogan = $request->input('slogan');
+        $callperplexity= $this->callPerplexity($country, $name, $slogan, $accountId, $generated->id);
+        $fuentes=$callperplexity['fuentes'];
+        $fuentesFormatted = !empty($fuentes) ? "- " . implode("\n- ", $fuentes) : "No se encontraron fuentes.";
+        
+        if (!is_array($callperplexity) || isset($callperplexity['error'])) {
+            // No hay error en la respuesta
+        } 
+        $callperplexity = preg_replace('/<think>.*?<\/think>/s', '', $callperplexity['data']);
+        
 
 
-    // Construir el prompt para la IA
-    $prompt = <<<EOT
+        // Construir el prompt para la IA
+        $prompt = <<<EOT
 Eres un experto en el armado de Briefs para publicidad y marketing, Analiza detalladamente la información proporcionada (responde siempre en español) y extrae la información clave sobre la marca y sus productos. Organiza los datos en las siguientes categorías, manteniendo el formato y estructura del ejemplo dado:
 Mejora la estructura y calidad del contenido para hacerlo más impactante.
 Refina la redacción para que tenga un enfoque publicitario y estratégico, manteniendo un tono claro y persuasivo.
@@ -700,29 +848,38 @@ Slogan: $slogan \n
 Extrae la información para analizar, estructurar y sugerir desde aquí:
 EOT;
 
-    if (!empty($contentSite)) {
-        $prompt .= "Contenido de sitios actualizados subido por el usuario" . json_encode($contentSite) . "\n";
-    }
-    if (!empty($contentFile)) {
-        $prompt .= "Contenido de archivos actualizados subido por el usuario" . json_encode($contentFile) . "\n";
-    }
-    if (!empty($contentInvestigation)) {
-        $prompt .= "Contenido de investigaciones actualizadas subido por el usuario" . json_encode($contentInvestigation) . "\n";
-    }
-    if (!empty($callperplexity)) {
-        $prompt .= "Contenido de informacion buscado en internet" . json_encode($callperplexity) . "\n";
-    }
+        if (!empty($contentSite)) {
+            $prompt .= "Contenido de sitios actualizados subido por el usuario" . json_encode($contentSite) . "\n";
+        }
+        if (!empty($contentFile)) {
+            $prompt .= "Contenido de archivos actualizados subido por el usuario" . json_encode($contentFile) . "\n";
+        }
+        if (!empty($contentInvestigation)) {
+            $prompt .= "Contenido de investigaciones actualizadas subido por el usuario" . json_encode($contentInvestigation) . "\n";
+        }
+        if (!empty($callperplexity)) {
+            $prompt .= "Contenido de informacion buscado en internet" . json_encode($callperplexity) . "\n";
+        }
 
-    $prompt .= "Solo entrega las respuestas sin ninguna nota al inicio o al final y toma como prioridad a la información subida por el usuario.";
-
-
-    try {
-        $model = "gemini-2.5-flash";
+        $model = self::MODEL_GEMINI_FLASH;
         $temperature = 0.7;
         $response = GeminiService::TextOnlyEntry($prompt, $model, $temperature);
+        
+        // Log de tokens Gemini
+        if(isset($response['usageMetadata'])) {
+            Log::info('Usage tokens Gemini (GenerarBriefGenerateIA)', [
+                'account_id' => $accountId,
+                'usage' => $response['usageMetadata']
+            ]);
+            
+            // Registrar uso de tokens si está disponible y el proceso fue exitoso
+            if (isset($response['data']) && !isset($response['error'])) {
+                $this->trackUsageIfAvailable($accountId, $model, $response['usageMetadata'], 'gemini', 'GenerarBriefGenerateIA', $generated->id);
+            }
+        }
 
         if (!isset($response['data'])) {
-            Log::error('La respuesta de ChatCompletions no contiene la clave "data"', [
+            Log::error('La respuesta de Gemini no contiene la clave "data"', [
                 'response' => $response,
                 'account_id' => $accountId
             ]);
@@ -731,67 +888,82 @@ EOT;
             ], 500);
         }
 
+        // try {
+            // Guardar o actualizar la respuesta de la IA
+            // Field::updateOrCreate(
+            //     ['key' => 'extraccionIA', 'account_id' => $accountId],
+            //     ['value' => $response['data']]
+            // );
 
-    } catch (\Exception $e) {
-        Log::error('Error en la llamada a PerplexityService::ChatCompletions', [
-            'exception' => $e->getMessage(),
-            'prompt' => $prompt
-        ]);
-        return response()->json(['error' => 'Error al procesar la solicitud de IA.'], 500);
-    }
+            $metadata['extraccionIA'] = $response['data'];
+            $generated->update([
+                'metadata' => json_encode($metadata)
+            ]);
 
-    // try {
-        // Guardar o actualizar la respuesta de la IA
-        // Field::updateOrCreate(
-        //     ['key' => 'extraccionIA', 'account_id' => $accountId],
-        //     ['value' => $response['data']]
-        // );
+        // } catch (\Exception $e) {
+        //     Log::error('Error al guardar la respuesta de la IA', [
+        //         'exception' => $e->getMessage(),
+        //         'account_id' => $accountId
+        //     ]);
+        //     return response()->json(['error' => 'Error al guardar los datos de IA.'], 500);
+        // }
 
-        $metadata['extraccionIA'] = $response['data'];
-        $generated->update([
-            'metadata' => json_encode($metadata)
-        ]);
-
-    // } catch (\Exception $e) {
-    //     Log::error('Error al guardar la respuesta de la IA', [
-    //         'exception' => $e->getMessage(),
-    //         'account_id' => $accountId
-    //     ]);
-    //     return response()->json(['error' => 'Error al guardar los datos de IA.'], 500);
-    // }
-
-   
-    $briefContent = $response['data']. "\n\n## **Fuentes**\n\n" . $fuentesFormatted;
-
-    Log::info('Proceso completado correctamente', [
-        'account' => $accountId,
-        'briefContent' => $briefContent
-    ]);
-
-    $metadata['brief'] = $briefContent;
-    $metadata['step'] = 9;
-    $generated->update([
-        'metadata' => json_encode($metadata),
-    ]);
-
-    return response()->json([
-        'success' => 'Datos procesados correctamente.',
-        'details' => [
-            'data' => $briefContent, 
-        ],
-        'goto' => 9,
-        'function' => 'BriefGeneradoFormIA',
-        'id_generated' => $generated->id
-    ]);
-    // return response()->json([
-    //     'success' => 'Datos procesados correctamente.',
-    //     'details' => array_merge([
-    //         'data' => $briefContent,
-    //     ], ['sonar' => $callperplexity['data']]), 
-    //     'goto' => 9,
-    //     'function' => 'BriefGeneradoFormIA'
-    // ]);
     
+        $briefContent = $response['data']. "\n\n## **Fuentes**\n\n" . $fuentesFormatted;
+
+        Log::info('Proceso completado correctamente', [
+            'account' => $accountId,
+            'briefContent' => $briefContent
+        ]);
+
+        $metadata['brief'] = $briefContent;
+        $metadata['step'] = 9;
+        $generated->update([
+            'metadata' => json_encode($metadata),
+        ]);
+
+        return response()->json([
+            'success' => 'Datos procesados correctamente.',
+            'details' => [
+                'data' => $briefContent, 
+            ],
+            'goto' => 9,
+            'function' => 'BriefGeneradoFormIA',
+            'id_generated' => $generated->id
+        ]);
+        // return response()->json([
+        //     'success' => 'Datos procesados correctamente.',
+        //     'details' => array_merge([
+        //         'data' => $briefContent,
+        //     ], ['sonar' => $callperplexity['data']]), 
+        //     'goto' => 9,
+        //     'function' => 'BriefGeneradoFormIA'
+        // ]);
+        
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en GenerarBriefGenerateIA', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+    } catch (\Exception $e) {
+        // Otros errores - mostrar mensaje genérico
+        Log::error('Error al generar Brief con IA', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId,
+            'trace' => $e->getTraceAsString()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al generar el Brief. Por favor, intenta nuevamente.',
+        ]);
+    }
 }
 
 
@@ -854,7 +1026,7 @@ EOT;
         return response()->json(['success' => 'Datos procesados correctamente.', 'details' => true, 'goto' => 10]);
     }
 
-    public function callPerplexity($country, $name, $slogan){
+    public function callPerplexity($country, $name, $slogan, $accountId = null, $generatedId = null){
         $prompt = <<<EOT
 Realiza una investigación sobre la marca $name que opera en el país $country.
 Extrae información actualizada y relevante sobre la empresa y su entorno de mercado.
@@ -918,26 +1090,99 @@ Actúas como un buscador de información de alto valor especializado en analizar
 EOT;
 
 try {
-    $model = "sonar-reasoning-pro";
+    $model = self::MODEL_PERPLEXITY_REASONING;
     $temperature = 0.7;
+    
+    Log::info('🔍 [callPerplexity] Iniciando llamada a Perplexity', [
+        'model' => $model,
+        'temperature' => $temperature,
+        'account_id' => $accountId,
+        'generated_id' => $generatedId,
+        'prompt_length' => strlen($prompt)
+    ]);
+    
     $response = PerplexityService::ChatCompletions($prompt, $model, $temperature, $system_prompt);
-
-    if (!isset($response['data'])) {
-        Log::error('La respuesta de ChatCompletions no contiene la clave "data"', [
-            'response' => $response,
+    
+    // Log COMPLETO de la respuesta de Perplexity (especialmente útil para debug)
+    Log::info('🔍 [callPerplexity] Respuesta COMPLETA de Perplexity', [
+        'response_type' => gettype($response),
+        'response_keys' => is_array($response) ? array_keys($response) : 'no es array',
+        'has_data' => isset($response['data']),
+        'has_error' => isset($response['error']),
+        'has_usage' => isset($response['usage']),
+        'has_citations' => isset($response['citations']),
+        'response_full' => $response, // Log completo para ver exactamente qué devuelve
+    ]);
+    
+    // Si hay error, log detallado
+    if (isset($response['error'])) {
+        Log::error('❌ [callPerplexity] Error en respuesta de Perplexity', [
+            'error' => $response['error'],
+            'error_type' => gettype($response['error']),
+            'response_completa' => $response,
+            'account_id' => $accountId,
+            'generated_id' => $generatedId
         ]);
-        return response()->json([
-            'error' => 'Error al obtener datos de la IA. Por favor, intenta nuevamente.'
-        ], 500);
+    }
+    
+    // Log de tokens Perplexity
+    if(isset($response['usage'])) {
+        Log::info('✅ [callPerplexity] Usage tokens Perplexity', [
+            'usage' => $response['usage']
+        ]);
+    } else {
+        Log::warning('⚠️ [callPerplexity] No se encontró usage en respuesta Perplexity', [
+            'response_keys' => is_array($response) ? array_keys($response) : 'no es array',
+            'response' => $response
+        ]);
+    }
+    
+    // Log de citations Perplexity
+    if(isset($response['citations']) && !empty($response['citations'])) {
+        Log::info('📚 [callPerplexity] Citations Perplexity', [
+            'citations_count' => count($response['citations']),
+            'citations' => $response['citations']
+        ]);
+    }
+    
+    // Registrar uso de tokens si está disponible y el proceso fue exitoso
+    if (isset($response['data']) && !isset($response['error']) && $accountId && isset($response['usage'])) {
+        $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'perplexity', 'callPerplexity', $generatedId);
     }
 
-    return array('data' =>  $response['data'],'fuentes'=>$response['citations']);
-} catch (\Exception $e) {
-    Log::error('Error en la llamada a PerplexityService::ChatCompletions', [
-        'exception' => $e->getMessage(),
-        'prompt' => $prompt
+    // Verificar si hay error ANTES de intentar acceder a 'data'
+    if (isset($response['error'])) {
+        Log::error('❌ [callPerplexity] Error detectado, no se puede continuar', [
+            'error' => $response['error'],
+            'response_completa' => $response
+        ]);
+        return array('error' => $response['error'], 'fuentes' => []);
+    }
+
+    if (!isset($response['data'])) {
+        Log::error('❌ [callPerplexity] La respuesta no contiene la clave "data"', [
+            'response' => $response,
+            'response_keys' => is_array($response) ? array_keys($response) : 'no es array',
+            'account_id' => $accountId,
+            'generated_id' => $generatedId
+        ]);
+        return array('error' => 'Error al obtener datos de la IA. La respuesta no contiene datos.', 'fuentes' => []);
+    }
+
+    Log::info('✅ [callPerplexity] Respuesta exitosa, retornando datos', [
+        'data_length' => strlen($response['data']),
+        'citations_count' => isset($response['citations']) ? count($response['citations']) : 0
     ]);
-    return response()->json(['error' => 'Error al procesar la solicitud de IA.'], 500);
+
+    return array('data' =>  $response['data'],'fuentes'=>$response['citations'] ?? []);
+} catch (\Exception $e) {
+    Log::error('❌ [callPerplexity] Excepción en la llamada a PerplexityService::ChatCompletions', [
+        'exception' => $e->getMessage(),
+        'trace' => $e->getTraceAsString(),
+        'account_id' => $accountId,
+        'generated_id' => $generatedId
+    ]);
+    return array('error' => 'Error al procesar la solicitud de IA: ' . $e->getMessage(), 'fuentes' => []);
 }
 
 }

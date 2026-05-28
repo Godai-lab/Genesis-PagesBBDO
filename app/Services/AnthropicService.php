@@ -44,8 +44,11 @@ class AnthropicService
             if(!isset($response_data['error'])){
                 if (isset($response_data['content'])) {
                     $choices = $response_data['content'][0]['text'];
-                    // return $choices;
-                    return array('data' => $choices);
+                    $result = array('data' => $choices);
+                    if (isset($response_data['usage'])) {
+                        $result['usage'] = $response_data['usage'];
+                    }
+                    return $result;
                 }else{
                     return array('error' => $response_data);
                     // throw new HttpException(400, $response_data);

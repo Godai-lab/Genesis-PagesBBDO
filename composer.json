@@ -21,6 +21,7 @@
         "maestroerror/laragent": "^0.8.0",
         "phpoffice/phpspreadsheet": "^1.29",
         "phpoffice/phpword": "^1.2",
+        "rappasoft/laravel-livewire-tables": "^3.7",
         "smalot/pdfparser": "^2.10",
         "usernotnull/tall-toasts": "^2.0"
     },

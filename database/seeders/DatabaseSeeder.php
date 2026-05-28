@@ -22,6 +22,7 @@ class DatabaseSeeder extends Seeder
             AccountSeeder::class,
             UserSeeder::class,
             PermissionSeeder::Class,
+            AiModelsSeeder::class,
         ]);
     }
 }

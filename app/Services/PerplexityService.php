@@ -53,8 +53,11 @@ class PerplexityService
                 if (isset($response_data['choices'])) {
                     $choices = $response_data['choices'][0]['message']['content'];
                     $citations = $response_data['citations'];
-                    // return $choices;
-                    return array('data' => $choices, 'citations' => $citations);
+                    $result = array('data' => $choices, 'citations' => $citations);
+                    if (isset($response_data['usage'])) {
+                        $result['usage'] = $response_data['usage'];
+                    }
+                    return $result;
                 }else{
                     return array('error' => $response_data);
                     // throw new HttpException(400, $response_data);

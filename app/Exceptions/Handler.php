@@ -26,5 +26,9 @@ class Handler extends ExceptionHandler
         $this->reportable(function (Throwable $e) {
             //
         });
+
+        $this->renderable(function (CreditLimitExceededException $e, $request) {
+            return $e->render($request);
+        });
     }
 }

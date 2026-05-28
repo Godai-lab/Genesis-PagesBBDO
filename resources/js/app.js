@@ -5,6 +5,7 @@ import './bootstrap';
 import {Alpine,Livewire} from '../../vendor/livewire/livewire/dist/livewire.esm';
 import ToastComponent from '../../vendor/usernotnull/tall-toasts/resources/js/tall-toasts';
 import Swal from 'sweetalert2';
+import '../../vendor/rappasoft/laravel-livewire-tables/resources/imports/laravel-livewire-tables-all.js';
 
 Alpine.plugin(ToastComponent);
 

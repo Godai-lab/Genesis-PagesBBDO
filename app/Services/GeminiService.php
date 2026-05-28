@@ -47,8 +47,11 @@ class GeminiService
             if(!isset($response_data['error'])){
                 if (isset($response_data['candidates'])) {
                     $choices = $response_data['candidates'][0]['content']['parts'][0]['text'];
-                    // return $choices;
-                    return array('data' => $choices);
+                    $result = array('data' => $choices);
+                    if (isset($response_data['usageMetadata'])) {
+                        $result['usageMetadata'] = $response_data['usageMetadata'];
+                    }
+                    return $result;
                 }else{
                     return array('error' => $response_data);
                     // throw new HttpException(400, $response_data);

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use App\Models\Account;
 use App\Models\Brand;
 use App\Models\Field;
@@ -11,6 +12,7 @@ use App\Services\GeminiService;
 use App\Services\OpenAiService;
 use App\Services\PerplexityService;
 use App\Services\ProcessFileContentService;
+use App\Supports\CostCalculationService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -20,6 +22,142 @@ use Illuminate\Support\Facades\Log;
 
 class Herramienta2Controller extends Controller
 {
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Herramienta 2 - Genesis';
+    
+    // Modelos utilizados por cada funcionalidad (para registro de uso)
+    // Estos modelos NO se envían al ChatPrompt, solo se usan para trackUsageIfAvailable
+    private const MODEL_GENESIS = 'claude-sonnet-4-5-20250929';
+    private const MODEL_CONSTRUCCION_ESCENARIO = 'claude-sonnet-4-5-20250929';
+    private const MODEL_VALIDAR_CONCEPTO = 'gpt-5.2-2025-12-11';
+    private const MODEL_MEJORAR_CONCEPTO = 'gpt-5.2-2025-12-11';
+    private const MODEL_CREATIVIDAD = 'gpt-5-mini-2025-08-07';
+    private const MODEL_ESTRATEGIA = 'gpt-5-mini-2025-08-07';
+    private const MODEL_IDEAS_CONTENIDO = 'gpt-5-mini-2025-08-07';
+    private const MODEL_INSIGHT = 'sonar-reasoning-pro';
+    private const MODEL_INSIGHT2 = 'sonar-reasoning-pro';
+    
+    /**
+     * Método auxiliar para registrar el uso de tokens de manera consistente
+     * 
+     * @param int $accountId ID de la cuenta
+     * @param string $model Nombre del modelo usado (ej: 'gpt-5', 'claude-sonnet-4-20250514', 'sonar-reasoning')
+     * @param array $usageData Datos de uso del servicio
+     * @param string $serviceType Tipo de servicio: 'anthropic', 'openai', 'perplexity'
+     * @param string $context Contexto de la llamada para logs (ej: 'generarGenesis', 'GenerarInsight')
+     * @param int|null $generatedId ID de la generación (Generated) para agrupar procesos
+     * @return void
+     */
+    private function trackUsageIfAvailable($accountId, $model, $usageData, $serviceType, $context = '', $generatedId = null)
+    {
+        try {
+            Log::info("🔍 trackUsageIfAvailable llamado", [
+                'accountId' => $accountId,
+                'model' => $model,
+                'serviceType' => $serviceType,
+                'context' => $context,
+                'generatedId' => $generatedId,
+                'usageData_keys' => is_array($usageData) ? array_keys($usageData) : 'no es array',
+                'usageData' => $usageData
+            ]);
+            
+            $inputTokens = 0;
+            $outputTokens = 0;
+            
+            // Extraer tokens según el tipo de servicio
+            if ($serviceType === 'anthropic' && isset($usageData['input_tokens']) && isset($usageData['output_tokens'])) {
+                $inputTokens = $usageData['input_tokens'];
+                $outputTokens = $usageData['output_tokens'];
+            } elseif ($serviceType === 'openai') {
+                // OpenAI puede devolver input_tokens/output_tokens (nuevo formato) o prompt_tokens/completion_tokens (formato antiguo)
+                // reasoning_tokens está incluido en output_tokens, no se cobra por separado
+                if (isset($usageData['input_tokens']) && isset($usageData['output_tokens'])) {
+                    $inputTokens = $usageData['input_tokens'];
+                    $outputTokens = $usageData['output_tokens'];
+                } elseif (isset($usageData['prompt_tokens']) && isset($usageData['completion_tokens'])) {
+                    $inputTokens = $usageData['prompt_tokens'];
+                    $outputTokens = $usageData['completion_tokens'];
+                }
+                
+                Log::info("📊 Tokens extraídos de OpenAI", [
+                    'inputTokens' => $inputTokens,
+                    'outputTokens' => $outputTokens,
+                    'total_tokens' => $usageData['total_tokens'] ?? 'no disponible',
+                    'has_reasoning_tokens' => isset($usageData['output_tokens_details']['reasoning_tokens'])
+                ]);
+                
+                if ($inputTokens === 0 && $outputTokens === 0) {
+                    Log::warning("⚠️ No se encontraron tokens en usageData de OpenAI", [
+                        'usageData_keys' => is_array($usageData) ? array_keys($usageData) : 'no es array',
+                        'usageData' => $usageData
+                    ]);
+                }
+            } elseif ($serviceType === 'perplexity') {
+                // Perplexity devuelve prompt_tokens y completion_tokens
+                $inputTokens = $usageData['prompt_tokens'] ?? 0;
+                $outputTokens = $usageData['completion_tokens'] ?? 0;
+                
+                Log::info("📊 Tokens extraídos de Perplexity", [
+                    'inputTokens' => $inputTokens,
+                    'outputTokens' => $outputTokens,
+                    'total_tokens' => $usageData['total_tokens'] ?? 'no disponible'
+                ]);
+                
+                if ($inputTokens === 0 && $outputTokens === 0) {
+                    Log::warning("⚠️ No se encontraron tokens en usageData de Perplexity", [
+                        'usageData_keys' => is_array($usageData) ? array_keys($usageData) : 'no es array',
+                        'usageData' => $usageData
+                    ]);
+                }
+            } else {
+                Log::warning("⚠️ Tipo de servicio no reconocido o no se encontraron tokens", [
+                    'serviceType' => $serviceType,
+                    'usageData_keys' => is_array($usageData) ? array_keys($usageData) : 'no es array',
+                    'usageData' => $usageData
+                ]);
+            }
+            
+            // Solo registrar si hay tokens
+            if ($inputTokens > 0 || $outputTokens > 0) {
+                // Agregar sufijo "-Genesis" para identificar que es de Herramienta2
+                $requestType = $context ? $context . '-Genesis' : 'Genesis';
+                
+                CostCalculationService::trackUsage(
+                    $accountId,
+                    auth()->id(),
+                    $model,
+                    [
+                        'tokens' => [
+                            'input' => $inputTokens,
+                            'output' => $outputTokens
+                        ]
+                    ],
+                    Carbon::now(),
+                    $requestType,
+                    null, // external_request_id
+                    $generatedId, // generated_id
+                    $context, // step
+                    $serviceType // service_type
+                );
+                
+                Log::info("✅ Uso registrado exitosamente", [
+                    'context' => $context,
+                    'model' => $model,
+                    'input_tokens' => $inputTokens,
+                    'output_tokens' => $outputTokens,
+                    'generated_id' => $generatedId
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::error("⚠️ Error al registrar uso en {$context}", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            // No lanzamos la excepción para no interrumpir el flujo
+        }
+    }
+
     public function index(Request $request)
     {
         Gate::authorize('haveaccess','genesis.index');
@@ -134,6 +272,8 @@ class Herramienta2Controller extends Controller
         Log::info('Campos guardados en la base de datos');
         
         try {
+            // Validar límite de créditos antes de generar
+             $this->validateCreditLimit($accountId);
             Log::info('Iniciando generación de insight');
             $insightgenerado = $this->GenerarInsight($brief,$objective,$accountId, $generated->id); 
             Log::info('Insight generado exitosamente', [
@@ -274,8 +414,8 @@ Limpiar incluso lo que no se ve.
 
 EOT;
 
-            // $model = "claude-3-7-sonnet-20250219";
-            $model = "claude-sonnet-4-5-20250929";
+            // Usar la constante definida al inicio del controlador
+            $model = self::MODEL_GENESIS;
             
             $temperature = 0.8;
             
@@ -287,6 +427,14 @@ EOT;
             
             Log::info('Iniciando llamada a AnthropicService::TextGeneration');
             $response = AnthropicService::TextGeneration($prompt, $model, $temperature, $system_prompt);
+            
+            // Log de tokens Claude
+            if(isset($response['usage'])) {
+                Log::info('Usage tokens Claude (generarGenesis)', [
+                    'id_generated' => $generated->id,
+                    'usage' => $response['usage']
+                ]);
+            }
             
             Log::info('Respuesta de AnthropicService recibida', [
                 'response_type' => gettype($response),
@@ -304,6 +452,11 @@ EOT;
                     'success' => false,
                     'error' => 'Respuesta inesperada del servicio de IA, La respuesta no contiene los datos esperados',
                 ]);
+            }
+            
+            // Registrar uso de tokens si está disponible (solo si el proceso fue exitoso)
+            if (isset($response['usage'])) {
+                $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'anthropic', 'generarGenesis', $generated->id);
             }
             
             Log::info('Preparando respuesta final');
@@ -328,7 +481,19 @@ EOT;
 
             return response()->json($finalResponse);
 
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en generarGenesis', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
         } catch (\Exception $e) {
+            // Otros errores - mostrar mensaje genérico
             Log::error('Error al generar Genesis', [
                 'message' => $e->getMessage(),
                 'accountId' => $accountId,
@@ -470,9 +635,29 @@ Limpiar incluso lo que no se ve.
 EOT;
 
         try {
-            $model = "claude-sonnet-4-5-20250929";
+            // Validar límite de créditos antes de regenerar
+            $this->validateCreditLimit($accountId);
+            
+            $model = self::MODEL_GENESIS;
             $temperature = 0.8;
             $response = AnthropicService::TextGeneration($prompt, $model, $temperature, $system_prompt);
+            
+            // Log de tokens Claude
+            if(isset($response['usage'])) {
+                Log::info('Usage tokens Claude (regenerateGenesis)', [
+                    'id_generated' => $id_generated,
+                    'usage' => $response['usage']
+                ]);
+            }
+            
+            // Verificar que la respuesta sea exitosa antes de registrar
+            if (isset($response['data']) && !isset($response['error'])) {
+                // Registrar uso de tokens si está disponible
+                // Usar un step único para distinguir regeneraciones (se agregará como proceso separado en processes_detail)
+                if (isset($response['usage'])) {
+                    $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'anthropic', 'regenerateGenesis', $id_generated);
+                }
+            }
 
             $metadata['newgenesis'] = $response['data'];
             $metadata['oldgenesis'] = $genesisgenerado;
@@ -482,7 +667,19 @@ EOT;
             ]);
 
             return response()->json(['success' => true, 'data' => ['newgenesis' => $response['data'], 'oldgenesis' => $genesisgenerado], 'function' => 'regenerateGenesis', 'id_generated' => $generated->id]);
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en regenerateGenesis', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
         } catch (\Exception $e) {
+            // Otros errores - mostrar mensaje genérico
             Log::error('Error al regenerar Genesis', [
                 'message' => $e->getMessage(),
                 'accountId' => $accountId,
@@ -540,6 +737,9 @@ public function construccionescenario(Request $request){
             //     ['account_id' => $accountId, 'key' => '360_genesis'],
             //     ['value' => $genesisgenerado]
             // );
+
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
 
             $metadata['genesis'] = $genesisgenerado;
 
@@ -632,9 +832,26 @@ public function construccionescenario(Request $request){
 
             EOT;
 
-            $model = "claude-sonnet-4-5-20250929";
+            // Usar la constante definida al inicio del controlador
+            $model = self::MODEL_CONSTRUCCION_ESCENARIO;
             $temperature = 0.8;
             $response = AnthropicService::TextGeneration($prompt, $model, $temperature, $system_prompt);
+            
+            // Log de tokens Claude
+            if(isset($response['usage'])) {
+                Log::info('Usage tokens Claude (construccionescenario)', [
+                    'id_generated' => $id_generated,
+                    'usage' => $response['usage']
+                ]);
+            }
+            
+            // Verificar que la respuesta sea exitosa antes de registrar
+            if (isset($response['data']) && !isset($response['error'])) {
+                // Registrar uso de tokens si está disponible
+                if (isset($response['usage'])) {
+                    $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'anthropic', 'construccionescenario', $id_generated);
+                }
+            }
 
             // Field::updateOrCreate(
             //     ['account_id' => $accountId, 'key' => '360_construccionescenario'],
@@ -656,6 +873,17 @@ public function construccionescenario(Request $request){
             'id_generated' => $generated->id
                 ]);
 
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en construccionescenario', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
         } catch (\Exception $e) {
             Log::error('Error al generar construcción de escenario', [
                 'message' => $e->getMessage(),
@@ -711,6 +939,9 @@ public function regenerarConstruccionEscenario(Request $request){
         $genesisgenerado = $metadata['genesis'];
 
         try {
+            // Validar límite de créditos antes de regenerar
+            $this->validateCreditLimit($accountId);
+            
             $prompt = <<<EOT
             Analiza cuidadosamente la información disponible, incluyendo el Escenario ya generado previamente. Tu tarea es construir un nuevo escenario creativo que sea distinto al anterior, pero manteniendo coherencia con el objetivo y los insights sociales. No debe ser una repetición, sino una nueva interpretación creativa con un enfoque diferente.
 
@@ -758,9 +989,32 @@ public function regenerarConstruccionEscenario(Request $request){
 
             EOT;
 
-            $model = "claude-sonnet-4-5-20250929";
+            // Usar la constante definida al inicio del controlador
+            $model = self::MODEL_CONSTRUCCION_ESCENARIO;
             $temperature = 0.8;
             $response = AnthropicService::TextGeneration($prompt, $model, $temperature, $system_prompt);
+            
+            // Log de tokens Claude
+            if(isset($response['usage'])) {
+                Log::info('Usage tokens Claude (regenerarConstruccionEscenario)', [
+                    'id_generated' => $id_generated,
+                    'usage' => $response['usage']
+                ]);
+            }
+            
+            // IMPORTANTE: Cuando se regenera el escenario, NO se llama a GenerarInsight2 nuevamente
+            // porque se usan los insights anteriores del metadata. Esto significa que no se registra
+            // el uso de Perplexity en regeneraciones, solo el uso de Claude para regenerar el escenario.
+            // Si en el futuro se decide regenerar también los insights, se debe llamar a GenerarInsight2 aquí.
+            
+            // Verificar que la respuesta sea exitosa antes de registrar
+            if (isset($response['data']) && !isset($response['error'])) {
+                // Registrar uso de tokens si está disponible
+                // Usar un step único para distinguir regeneraciones (se agregará como proceso separado en processes_detail)
+                if (isset($response['usage'])) {
+                    $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'anthropic', 'regenerarConstruccionEscenario', $id_generated);
+                }
+            }
 
             $metadata['newescenario'] = $response['data'];
             $metadata['oldescenario'] = $construccionescenario;
@@ -770,7 +1024,19 @@ public function regenerarConstruccionEscenario(Request $request){
             ]);
 
             return response()->json(['success' => true, 'data' => ['newescenario' => $response['data'], 'oldescenario' => $construccionescenario], 'function' => 'regenerarConstruccionEscenario', 'id_generated' => $generated->id]);
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en regenerarConstruccionEscenario', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
         } catch (\Exception $e) {
+            // Otros errores - mostrar mensaje genérico
             Log::error('Error al regenerar construcción de escenario', [
                 'message' => $e->getMessage(),
                 'accountId' => $accountId,
@@ -954,6 +1220,9 @@ public function validarconcepto(Request $request){
                 'metadata' => json_encode($metadata)
             ]);
 
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+
             $options = [
                 'prompt' => [
                     'id' => 'pmpt_68a2319d991c8190a4152ca9c8ae51e705034b13c3fd9d8e',
@@ -983,6 +1252,11 @@ public function validarconcepto(Request $request){
                 ]);
                 return response()->json(['success' => false, 'error' => $response['error']]);
             }
+            
+            // Registrar uso de tokens si está disponible (solo si el proceso fue exitoso)
+            if (isset($response['data']['usage'])) {
+                $this->trackUsageIfAvailable($accountId, self::MODEL_VALIDAR_CONCEPTO, $response['data']['usage'], 'openai', 'validarconcepto', $generated->id);
+            }
 
             $metadata['id_generacion_concepto'] = $response['data']['id'];
             $metadata['generacion_concepto_data'] = $response['data'];
@@ -999,6 +1273,17 @@ public function validarconcepto(Request $request){
         }else{
             return response()->json(['success' => false, 'error' => 'faltan datos']);
         }
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en validarconcepto', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId ?? null
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
     } catch (\Exception $e) {
         Log::error('Error al validar concepto', [
             'message' => $e->getMessage(),
@@ -1051,6 +1336,11 @@ public function get_concepto($generationId){
                         }
                     }
                 }
+            }
+            
+            // Registrar uso de tokens cuando se completa exitosamente
+            if (isset($response['data']['usage'])) {
+                $this->trackUsageIfAvailable($generated->account_id, self::MODEL_VALIDAR_CONCEPTO, $response['data']['usage'], 'openai', 'get_concepto', $generated->id);
             }
         }
 
@@ -1172,6 +1462,9 @@ public function mejorarConcepto(Request $request){
 
         $creatividad = $metadata['construccionescenario'];
 
+        // Validar límite de créditos antes de generar
+        $this->validateCreditLimit($accountId);
+
         $options = [
             'prompt' => [
                 'id' => 'pmpt_68cc1dd185588193a98bf0d237f72c0206d213a923b14fc6',
@@ -1192,6 +1485,11 @@ public function mejorarConcepto(Request $request){
             ]);
             return response()->json(['success' => false, 'error' => $response['error']]);
         }
+        
+        // Registrar uso de tokens si está disponible (solo si el proceso fue exitoso)
+        if (isset($response['data']['usage'])) {
+            $this->trackUsageIfAvailable($accountId, self::MODEL_MEJORAR_CONCEPTO, $response['data']['usage'], 'openai', 'mejorarConcepto', $generated->id);
+        }
 
         $metadata['id_generacion_mejorar_concepto'] = $response['data']['id'];
         $metadata['generacion_mejorar_concepto_data'] = $response['data'];
@@ -1205,8 +1503,27 @@ public function mejorarConcepto(Request $request){
         ]);
 
         return response()->json(['success' => true, 'data' => $response['data'], 'function' => 'mejorarConcepto', 'id_generated' => $generated->id]);
-    }catch(\Exception $e){
-        return response()->json(['success' => false, 'error' => $e->getMessage()]);
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en mejorarConcepto', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+    } catch(\Exception $e){
+        Log::error('Error al mejorar concepto', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId ?? null,
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al mejorar el concepto. Por favor, intenta nuevamente.'
+        ]);
     }
 }
 
@@ -1253,6 +1570,11 @@ public function get_concepto_mejorado($generationId){
                         }
                     }
                 }
+            }
+            
+            // Registrar uso de tokens cuando se completa exitosamente
+            if (isset($response['data']['usage'])) {
+                $this->trackUsageIfAvailable($generated->account_id, self::MODEL_MEJORAR_CONCEPTO, $response['data']['usage'], 'openai', 'get_concepto_mejorado', $generated->id);
             }
         }
 
@@ -1398,6 +1720,9 @@ public function setGenerarCreatividad(Request $request){
                 'category' => $category
             ]);
 
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+
             $creatividad = $this->generarCreatividad($Tipodecampaña, $objective, $genesiscompleto, $brief, $category);
             
             if(!$creatividad['success']){
@@ -1409,6 +1734,21 @@ public function setGenerarCreatividad(Request $request){
             }
             
             $id_generacion_creatividad = $creatividad['data']['id'] ?? null;
+            
+            // Log del ID de respuesta
+            Log::info('ID de respuesta generarCreatividad', [
+                'id_generated' => $id_generated,
+                'id_generacion_creatividad' => $id_generacion_creatividad
+            ]);
+            
+            // Log del objeto usage (si existe en la respuesta inicial)
+            if(isset($creatividad['data']['usage'])) {
+                Log::info('Usage tokens generarCreatividad', [
+                    'id_generated' => $id_generated,
+                    'id_generacion_creatividad' => $id_generacion_creatividad,
+                    'usage' => $creatividad['data']['usage']
+                ]);
+            }
             
             Log::info('Generación de creatividad iniciada exitosamente', [
                 'id_generated' => $id_generated,
@@ -1429,8 +1769,26 @@ public function setGenerarCreatividad(Request $request){
         }else{
             return response()->json(['success' => false, 'error' => 'faltan datos']);
         }
-    }catch(\Exception $e){
-        return response()->json(['success' => false, 'error' => $e->getMessage()]);
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en setGenerarCreatividad', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId ?? null
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+    } catch(\Exception $e){
+        Log::error('Error al generar creatividad', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al generar la creatividad. Por favor, intenta nuevamente.'
+        ]);
     }
 }
 
@@ -1476,6 +1834,23 @@ public function get_construccion_creatividad($generationId){
             ]);
             $responseCreatividad = OpenAiService::getModelResponse($id_generacion_creatividad);
             
+            // Log del ID de respuesta
+            $responseId = $responseCreatividad['data']['id'] ?? null;
+            Log::info('ID de respuesta OpenAI (Creatividad)', [
+                'id_generated' => $generationId,
+                'id_generacion_creatividad' => $id_generacion_creatividad,
+                'response_id' => $responseId
+            ]);
+            
+            // Log del objeto usage
+            if(isset($responseCreatividad['data']['usage'])) {
+                Log::info('Usage tokens OpenAI (Creatividad)', [
+                    'id_generated' => $generationId,
+                    'id_generacion_creatividad' => $id_generacion_creatividad,
+                    'usage' => $responseCreatividad['data']['usage']
+                ]);
+            }
+            
             if(isset($responseCreatividad['success']) && !$responseCreatividad['success']){
                 Log::error('Error en respuesta de OpenAI', [
                     'error' => $responseCreatividad['error']
@@ -1499,6 +1874,11 @@ public function get_construccion_creatividad($generationId){
                                 }
                             }
                         }
+                    }
+                    
+                    // Registrar uso de tokens cuando se completa exitosamente
+                    if (isset($responseCreatividad['data']['usage'])) {
+                        $this->trackUsageIfAvailable($generated->account_id, self::MODEL_CREATIVIDAD, $responseCreatividad['data']['usage'], 'openai', 'get_construccion_creatividad', $generationId);
                     }
                     
                     Log::info('Generación de creatividad completada', [
@@ -1674,6 +2054,9 @@ public function setGenerarEstrategia(Request $request){
                 'country' => $country
             ]);
 
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+
             $estrategia = $this->generarEstrategia($Tipodecampaña, $objective, $genesiscompleto, $country, $brief);
             
             if(!$estrategia['success']){
@@ -1685,6 +2068,21 @@ public function setGenerarEstrategia(Request $request){
             }
             
             $id_generacion_estrategia = $estrategia['data']['id'] ?? null;
+            
+            // Log del ID de respuesta
+            Log::info('ID de respuesta generarEstrategia', [
+                'id_generated' => $id_generated,
+                'id_generacion_estrategia' => $id_generacion_estrategia
+            ]);
+            
+            // Log del objeto usage (si existe en la respuesta inicial)
+            if(isset($estrategia['data']['usage'])) {
+                Log::info('Usage tokens generarEstrategia', [
+                    'id_generated' => $id_generated,
+                    'id_generacion_estrategia' => $id_generacion_estrategia,
+                    'usage' => $estrategia['data']['usage']
+                ]);
+            }
             
             Log::info('Generación de estrategia iniciada exitosamente', [
                 'id_generated' => $id_generated,
@@ -1707,8 +2105,26 @@ public function setGenerarEstrategia(Request $request){
         }else{
             return response()->json(['success' => false, 'error' => 'faltan datos']);
         }
-    }catch(\Exception $e){
-        return response()->json(['success' => false, 'error' => $e->getMessage()]);
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en setGenerarEstrategia', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId ?? null
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+    } catch(\Exception $e){
+        Log::error('Error al generar estrategia', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al generar la estrategia. Por favor, intenta nuevamente.'
+        ]);
     }
 }
 
@@ -1789,6 +2205,21 @@ public function saveconstruccioncreatividadFinalizar(Request $request){
             
             $id_generacion_estrategia = $estrategia['data']['id'] ?? null;
             
+            // Log del ID de respuesta
+            Log::info('ID de respuesta generarEstrategia', [
+                'id_generated' => $id_generated,
+                'id_generacion_estrategia' => $id_generacion_estrategia
+            ]);
+            
+            // Log del objeto usage (si existe en la respuesta inicial)
+            if(isset($estrategia['data']['usage'])) {
+                Log::info('Usage tokens generarEstrategia', [
+                    'id_generated' => $id_generated,
+                    'id_generacion_estrategia' => $id_generacion_estrategia,
+                    'usage' => $estrategia['data']['usage']
+                ]);
+            }
+            
             Log::info('Generación de estrategia iniciada exitosamente', [
                 'id_generated' => $id_generated,
                 'id_generacion_estrategia' => $id_generacion_estrategia,
@@ -1850,6 +2281,23 @@ public function get_construccion_estrategia($generationId){
             ]);
             $responseEstrategia = OpenAiService::getModelResponse($id_generacion_estrategia);
             
+            // Log del ID de respuesta
+            $responseId = $responseEstrategia['data']['id'] ?? null;
+            Log::info('ID de respuesta OpenAI (Estrategia)', [
+                'id_generated' => $generationId,
+                'id_generacion_estrategia' => $id_generacion_estrategia,
+                'response_id' => $responseId
+            ]);
+            
+            // Log del objeto usage
+            if(isset($responseEstrategia['data']['usage'])) {
+                Log::info('Usage tokens OpenAI (Estrategia)', [
+                    'id_generated' => $generationId,
+                    'id_generacion_estrategia' => $id_generacion_estrategia,
+                    'usage' => $responseEstrategia['data']['usage']
+                ]);
+            }
+            
             if(isset($responseEstrategia['success']) && !$responseEstrategia['success']){
                 Log::error('Error en respuesta de OpenAI', [
                     'error' => $responseEstrategia['error']
@@ -1873,6 +2321,11 @@ public function get_construccion_estrategia($generationId){
                                 }
                             }
                         }
+                    }
+                    
+                    // Registrar uso de tokens cuando se completa exitosamente
+                    if (isset($responseEstrategia['data']['usage'])) {
+                        $this->trackUsageIfAvailable($generated->account_id, self::MODEL_ESTRATEGIA, $responseEstrategia['data']['usage'], 'openai', 'get_construccion_estrategia', $generationId);
                     }
                     
                     Log::info('Generación de estrategia completada', [
@@ -1994,6 +2447,9 @@ public function setGenerarIdeasContenido(Request $request){
                 'account_id' => $accountId
             ]);
 
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+
             $ideasContenido = $this->generarIdeasContenido($Tipodecampaña, $objective, $genesiscompleto, $brief, $construccioncreatividad, $construccionestrategia );
             
             if(!$ideasContenido['success']){
@@ -2005,6 +2461,21 @@ public function setGenerarIdeasContenido(Request $request){
             }
             
             $id_generacion_ideas_contenido = $ideasContenido['data']['id'] ?? null;
+            
+            // Log del ID de respuesta
+            Log::info('ID de respuesta generarIdeasContenido', [
+                'id_generated' => $id_generated,
+                'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido
+            ]);
+            
+            // Log del objeto usage (si existe en la respuesta inicial)
+            if(isset($ideasContenido['data']['usage'])) {
+                Log::info('Usage tokens generarIdeasContenido', [
+                    'id_generated' => $id_generated,
+                    'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido,
+                    'usage' => $ideasContenido['data']['usage']
+                ]);
+            }
             
             Log::info('Generación de ideas de contenido iniciada exitosamente', [
                 'id_generated' => $id_generated,
@@ -2029,8 +2500,26 @@ public function setGenerarIdeasContenido(Request $request){
         }else{
             return response()->json(['success' => false, 'error' => 'faltan datos']);
         }
-    }catch(\Exception $e){
-        return response()->json(['success' => false, 'error' => $e->getMessage()]);
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en setGenerarIdeasContenido', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId ?? null
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+    } catch(\Exception $e){
+        Log::error('Error al generar ideas de contenido', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al generar ideas de contenido. Por favor, intenta nuevamente.'
+        ]);
     }
 }
 
@@ -2112,6 +2601,21 @@ public function saveconstruccionestrategiaFinalizar(Request $request){
             
             $id_generacion_ideas_contenido = $ideasContenido['data']['id'] ?? null;
             
+            // Log del ID de respuesta
+            Log::info('ID de respuesta generarIdeasContenido', [
+                'id_generated' => $id_generated,
+                'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido
+            ]);
+            
+            // Log del objeto usage (si existe en la respuesta inicial)
+            if(isset($ideasContenido['data']['usage'])) {
+                Log::info('Usage tokens generarIdeasContenido', [
+                    'id_generated' => $id_generated,
+                    'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido,
+                    'usage' => $ideasContenido['data']['usage']
+                ]);
+            }
+            
             Log::info('Generación de ideas de contenido iniciada exitosamente', [
                 'id_generated' => $id_generated,
                 'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido,
@@ -2175,6 +2679,23 @@ public function get_construccion_ideasContenido($generationId){
             ]);
             $responseIdeasContenido = OpenAiService::getModelResponse($id_generacion_ideas_contenido);
             
+            // Log del ID de respuesta
+            $responseId = $responseIdeasContenido['data']['id'] ?? null;
+            Log::info('ID de respuesta OpenAI (Ideas Contenido)', [
+                'id_generated' => $generationId,
+                'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido,
+                'response_id' => $responseId
+            ]);
+            
+            // Log del objeto usage
+            if(isset($responseIdeasContenido['data']['usage'])) {
+                Log::info('Usage tokens OpenAI (Ideas Contenido)', [
+                    'id_generated' => $generationId,
+                    'id_generacion_ideas_contenido' => $id_generacion_ideas_contenido,
+                    'usage' => $responseIdeasContenido['data']['usage']
+                ]);
+            }
+            
             if(isset($responseIdeasContenido['success']) && !$responseIdeasContenido['success']){
                 Log::error('Error en respuesta de OpenAI', [
                     'error' => $responseIdeasContenido['error']
@@ -2199,6 +2720,11 @@ public function get_construccion_ideasContenido($generationId){
                             }
                         }
                         
+                    }
+                    
+                    // Registrar uso de tokens cuando se completa exitosamente
+                    if (isset($responseIdeasContenido['data']['usage'])) {
+                        $this->trackUsageIfAvailable($generated->account_id, self::MODEL_IDEAS_CONTENIDO, $responseIdeasContenido['data']['usage'], 'openai', 'get_construccion_ideasContenido', $generationId);
                     }
                     
                     Log::info('Generación de ideas de contenido completada', [
@@ -2353,57 +2879,86 @@ public function generateNewCreatividadEstrategiaInnovacion(Request $request){
     ini_set('max_execution_time', 600);
 
     $accountId = $request->input('account');
-    $account = Account::find($accountId);
-    $category = $account->category;
+    
+    try {
+        // Validar límite de créditos antes de generar
+        $this->validateCreditLimit($accountId);
+        
+        $account = Account::find($accountId);
+        $category = $account->category;
 
-    $type = $request->input('type');
-    $creatividad = $request->input('creatividad');
-    $estrategia = $request->input('estrategia');
-    $accountData = Field::where('account_id', $accountId)->pluck('value', 'key');
-    $id_generated = $request->input('id_generated');
-    $generated = Generated::find($id_generated);
-    if (!$generated) {
+        $type = $request->input('type');
+        $creatividad = $request->input('creatividad');
+        $estrategia = $request->input('estrategia');
+        $accountData = Field::where('account_id', $accountId)->pluck('value', 'key');
+        $id_generated = $request->input('id_generated');
+        $generated = Generated::find($id_generated);
+        if (!$generated) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Generación no encontrada'
+            ]);
+        }
+        $metadata = $generated->metadata ? json_decode($generated->metadata, true) : [];
+
+        if ($accountData) {
+            // Buscar el registro existente
+            $brief = $metadata['brief'];
+            $objective = $metadata['objective'];
+            $genesis = $metadata['genesis'];
+            $construccionescenario = $metadata['construccionescenario'];
+            $Tipodecampaña = $metadata['tipo_de_campaña'];
+            $country = $accountData->get('country');
+
+            switch ($type) {
+                case 'Creatividad':
+                    $response = $this->generarCreatividad($Tipodecampaña, $objective, $construccionescenario, $brief, $category);
+                    break;
+                case 'Estrategia':
+                    $response = $this->generarEstrategia($Tipodecampaña, $objective, $construccionescenario, $country, $brief);
+                    break;
+                case 'Contenido':
+                    $response = $this->generarIdeasContenido($Tipodecampaña, $objective, $construccionescenario, $brief, $creatividad, $estrategia );
+                    break;
+                // case 'Innovacion':
+                //     $response = $this->generarInnovacion($Tipodecampaña, $objective, $construccionescenario, $brief);
+                //     break;
+                default:
+                $response = null;
+                    break;
+                }
+
+            return response()->json($response);
+        }else{
+            return response()->json(['error' => 'faltan datos']);
+        }
+    } catch (\App\Exceptions\CreditLimitExceededException $e) {
+        // Error específico de límite de créditos - mostrar mensaje personalizado
+        Log::warning('Límite de créditos excedido en generateNewCreatividadEstrategiaInnovacion', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId
+        ]);
+
         return response()->json([
             'success' => false,
-            'error' => 'Generación no encontrada'
+            'error' => $e->getMessage(),
         ]);
-    }
-    $metadata = $generated->metadata ? json_decode($generated->metadata, true) : [];
+    } catch (\Exception $e) {
+        // Otros errores - mostrar mensaje genérico
+        Log::error('Error en generateNewCreatividadEstrategiaInnovacion', [
+            'message' => $e->getMessage(),
+            'accountId' => $accountId,
+            'trace' => $e->getTraceAsString()
+        ]);
 
-    if ($accountData) {
-        // Buscar el registro existente
-        $brief = $metadata['brief'];
-        $objective = $metadata['objective'];
-        $genesis = $metadata['genesis'];
-        $construccionescenario = $metadata['construccionescenario'];
-        $Tipodecampaña = $metadata['tipo_de_campaña'];
-        $country = $accountData->get('country');
-
-        switch ($type) {
-            case 'Creatividad':
-                $response = $this->generarCreatividad($Tipodecampaña, $objective, $construccionescenario, $brief, $category);
-                break;
-            case 'Estrategia':
-                $response = $this->generarEstrategia($Tipodecampaña, $objective, $construccionescenario, $country, $brief);
-                break;
-            case 'Contenido':
-                $response = $this->generarIdeasContenido($Tipodecampaña, $objective, $construccionescenario, $brief, $creatividad, $estrategia );
-                break;
-            // case 'Innovacion':
-            //     $response = $this->generarInnovacion($Tipodecampaña, $objective, $construccionescenario, $brief);
-            //     break;
-            default:
-            $response = null;
-                break;
-            }
-
-        return response()->json($response);
-    }else{
-        return response()->json(['error' => 'faltan datos']);
+        return response()->json([
+            'success' => false,
+            'error' => 'Ha ocurrido un error al generar. Por favor, intenta nuevamente.',
+        ]);
     }
 
 }
-public function generarCreatividad($Tipodecampaña, $objective, $genesiscompleto, $brief, $category, $modelo = 'gpt-5')
+public function generarCreatividad($Tipodecampaña, $objective, $genesiscompleto, $brief, $category)
 {
     try {
         ini_set('max_execution_time', 600);
@@ -2414,35 +2969,61 @@ public function generarCreatividad($Tipodecampaña, $objective, $genesiscompleto
         ]);
 
         // Mapeo categoría -> vector_store_ids
+        // $categoryVectorStores = [
+        //     'Alimentación y Bebidas'                   => 'vs_67e2ae4650588191b31d8b8224d0ac47',
+        //     'Moda y Belleza'                           => 'vs_67e2c08d6dbc81918e82f768e2e40ca9',
+        //     'Salud y Bienestar'                        => 'vs_67e2c1889d80819189d3e9f982470163',
+        //     'Tecnología y Electrónica'                 => 'vs_67e2c3211aec8191845de6144c927a39',
+        //     'Educación y Formación'                    => 'vs_67e2c39720e48191b46f2d0a02138ba1',
+        //     'Turismo y Entretenimiento'                => 'vs_67e2c5798354819186b610df3b1488d1',
+        //     'Automotriz y Transporte'                  => 'vs_67e2c62a81bc8191b666df23826ce005',
+        //     'Bienes Raíces y Construcción'             => 'vs_67e2c6e31c708191b345afc4c53aa916',
+        //     'Servicios Profesionales'                  => 'vs_67e2c7fc2c6c819188bef5fd84dad404',
+        //     'Deportes y Fitness'                       => 'vs_67e2c9854cd08191b5afe3b76fe4a36c',
+        //     'Salud y Medicina'                         => 'vs_67e2ca0cb83881918d49eed54fdbfdc2',
+        //     'E-commerce y Tiendas Online'              => 'vs_67e2cb4b90d08191a7b757db58fcbd0b',
+        //     'Bienestar y Estilo de Vida'               => 'vs_67e2cc0850ec8191abea747444f70980',
+        //     'Hogar y Decoración'                       => 'vs_67e2cdc951e08191a8f4f5a74789a235',
+        //     'Servicios Financieros'                    => 'vs_67e2cf37e2088191ba8654ad414bce1a',
+        //     'Energía y Sostenibilidad'                 => 'vs_67e2d462492c8191b316476dd2aec789',
+        //     'Agronegocios y Agroindustria'             => 'vs_67e2d55450d881919f61b5ee38eb1075',
+        //     'Medios, Comunicación y Contenido Digital' => 'vs_67e2d75ad19c81918ad687bf856b68b0',
+        //     'Logística y Cadena de Suministro'         => 'vs_WIikAxBR2wfrELhu6On7ALVt',
+        //     'Emprendimiento e Innovación'              => 'vs_67e2d8fa265c8191a14d802f759ae7e0',
+        //     'Arte, Cultura y Creatividad'              => 'vs_67e2da50d71c8191a17c2df1d768296c',
+        //     'Negocios B2B y Servicios Industriales'    => 'vs_67e2dcfc62ac8191b5048aa381ec4336',
+        //     'Gaming y eSports'                         => 'vs_67e2ddf1a2cc81919b720e353d43c2dd',
+        //     'Otra'                                  => 'vs_WIikAxBR2wfrELhu6On7ALVt',
+        // ];
         $categoryVectorStores = [
-            'Alimentación y Bebidas'                   => 'vs_67e2ae4650588191b31d8b8224d0ac47',
-            'Moda y Belleza'                           => 'vs_67e2c08d6dbc81918e82f768e2e40ca9',
-            'Salud y Bienestar'                        => 'vs_67e2c1889d80819189d3e9f982470163',
-            'Tecnología y Electrónica'                 => 'vs_67e2c3211aec8191845de6144c927a39',
-            'Educación y Formación'                    => 'vs_67e2c39720e48191b46f2d0a02138ba1',
-            'Turismo y Entretenimiento'                => 'vs_67e2c5798354819186b610df3b1488d1',
-            'Automotriz y Transporte'                  => 'vs_67e2c62a81bc8191b666df23826ce005',
-            'Bienes Raíces y Construcción'             => 'vs_67e2c6e31c708191b345afc4c53aa916',
-            'Servicios Profesionales'                  => 'vs_67e2c7fc2c6c819188bef5fd84dad404',
-            'Deportes y Fitness'                       => 'vs_67e2c9854cd08191b5afe3b76fe4a36c',
-            'Salud y Medicina'                         => 'vs_67e2ca0cb83881918d49eed54fdbfdc2',
-            'E-commerce y Tiendas Online'              => 'vs_67e2cb4b90d08191a7b757db58fcbd0b',
-            'Bienestar y Estilo de Vida'               => 'vs_67e2cc0850ec8191abea747444f70980',
-            'Hogar y Decoración'                       => 'vs_67e2cdc951e08191a8f4f5a74789a235',
-            'Servicios Financieros'                    => 'vs_67e2cf37e2088191ba8654ad414bce1a',
-            'Energía y Sostenibilidad'                 => 'vs_67e2d462492c8191b316476dd2aec789',
-            'Agronegocios y Agroindustria'             => 'vs_67e2d55450d881919f61b5ee38eb1075',
-            'Medios, Comunicación y Contenido Digital' => 'vs_67e2d75ad19c81918ad687bf856b68b0',
-            'Logística y Cadena de Suministro'         => 'vs_WIikAxBR2wfrELhu6On7ALVt',
-            'Emprendimiento e Innovación'              => 'vs_67e2d8fa265c8191a14d802f759ae7e0',
-            'Arte, Cultura y Creatividad'              => 'vs_67e2da50d71c8191a17c2df1d768296c',
-            'Negocios B2B y Servicios Industriales'    => 'vs_67e2dcfc62ac8191b5048aa381ec4336',
-            'Gaming y eSports'                         => 'vs_67e2ddf1a2cc81919b720e353d43c2dd',
-            'Otra'                                  => 'vs_WIikAxBR2wfrELhu6On7ALVt',
+            'Alimentación y Bebidas'                   => 'vs_69cb3d60175c8191b45280336e0c747b',
+            'Moda y Belleza'                           => 'vs_69cb3d1816ac81918bc3b6c4919619b9',
+            'Salud y Bienestar'                        => 'vs_69cc54c846588191b89b6b541ea4e627',
+            'Tecnología y Electrónica'                 => 'vs_69cb36e321c881919088b2fd363d4a6e',
+            'Educación y Formación'                    => 'vs_69cc54aebf948191a97577cb962e7e77',
+            'Turismo y Entretenimiento'                => 'vs_69cb35e6801081919b7b2adb8c365115',
+            'Automotriz y Transporte'                  => 'vs_69cb3cf6d3948191939d681fd0c409b6',
+            'Bienes Raíces y Construcción'             => 'vs_69cb366da6648191a4042387d2861b8f',
+            'Servicios Profesionales'                  => 'vs_69cc537015048191ad2fa5c31dd0f43c',
+            'Deportes y Fitness'                       => 'vs_69cc534c3a548191932b0596301397a9',
+            'Salud y Medicina'                         => 'vs_69cb43b91ad48191b9fdfcb09ee14453',
+            'E-commerce y Tiendas Online'              => 'vs_69cc548f7d3c8191aad6f7cdf183b023',
+            'Bienestar y Estilo de Vida'               => 'vs_69cb396f24208191baba0ba86f0a9b58',
+            'Hogar y Decoración'                       => 'vs_69cc51a7c2d881918eb2a23cf165cff7',
+            'Servicios Financieros'                    => 'vs_69cb3b3ea3d8819199d25e3fbe4d4cb4',
+            'Energía y Sostenibilidad'                 => 'vs_69cda81c3e508191866430d9475f6152',
+            'Agronegocios y Agroindustria'             => 'vs_69cda839458c8191bc4e76b69927c377',
+            'Medios, Comunicación y Contenido Digital' => 'vs_69cb3eaa88808191824afabbd0e859da',
+            'Logística y Cadena de Suministro'         => 'vs_69cda84e931c8191b1d14d97762326d0',
+            'Emprendimiento e Innovación'              => 'vs_69cda878349c81919a10f21551ba2976',
+            'Arte, Cultura y Creatividad'              => 'vs_69cda8bff8e08191ae766c8e1a17f2b9',
+            'Negocios B2B y Servicios Industriales'    => 'vs_69cb3b0c98d0819185677cb353ad4c06',
+            'Gaming y eSports'                         => 'vs_69cc532a65088191ac6b57431e55025f',
+            'Otra'                                     => 'vs_69cb42cda0b08191b54417701027fcd6',
         ];
 
         // ID especial para "Otra" o null
-        $vectorIdOtra = 'vs_WIikAxBR2wfrELhu6On7ALVt';
+        $vectorIdOtra = 'vs_69cb42cda0b08191b54417701027fcd6';
 
         // Resolver el vector store según categoría
         if ($category === null || strtolower($category) === 'otra') {
@@ -2452,7 +3033,7 @@ public function generarCreatividad($Tipodecampaña, $objective, $genesiscompleto
             $vectorIds = is_array($vectorEntry) ? $vectorEntry : [$vectorEntry];
         }
 
-        // Opciones para el chat-prompt
+        // Opciones para el chat-prompt (el modelo se define en el ChatPrompt del dashboard de OpenAI)
         $options = [
             'prompt' => [
                 'id' => 'pmpt_68c9cde4f2ac8196b3a33b12c74e47790435d1a45d459271',
@@ -2575,30 +3156,50 @@ EOT;
     return OpenAiService::CompletionsAssistants($promptCreatividad, $assistant_idCreatividad);
 }
 
-public function generarEstrategia($Tipodecampaña, $objective, $genesiscompleto, $country, $brief, $modelo = 'gpt-5')
+public function generarEstrategia($Tipodecampaña, $objective, $genesiscompleto, $country, $brief)
 {
     try {
         ini_set('max_execution_time', 600);
         // Mapeo de países a vector_store_ids
+        // $vectorStores = [
+        //     'Bolivia' => 'vs_67d056778cb08191a576ad35aa08e40f',
+        //     'Argentina' => 'vs_67d05805f67c8191b72413bcc4ed007f',
+        //     'Chile' => 'vs_67d058836eec8191ae9e68ccbdfb97b9',
+        //     'Colombia' => 'vs_67d075c66ea88191bdefe97058130ffc',
+        //     'Costa Rica' => 'vs_67d077079f388191a5c1b50154ac0b8b',
+        //     'Ecuador' => 'vs_67d078d06b5c81919076005ba58cc6b6',
+        //     'Guatemala' => 'vs_67d07d4e6b008191965bcd5b67f17223',
+        //     'Honduras' => 'vs_67d07f90406c8191826a9d2b09ed2e73',
+        //     'México' => 'vs_67d082c70f3c8191a1cd533b271331ed',
+        //     'Nicaragua' => 'vs_67d084b3b2b08191a771895ffee3ed04',
+        //     'Panamá' => 'vs_67d087007d7c81918476b7a20116bae4',
+        //     'Paraguay' => 'vs_67d088e01b6c8191bf51e013a9994464',
+        //     'Perú' => 'vs_67d08bf93ac88191b92a65da3128f9bf',
+        //     'Puerto Rico' => 'vs_67d08def19a4819191d8eb6e66a5dfe3',
+        //     'Uruguay' => 'vs_67d08f82493081919f0f18ec30e0aed7',
+        //     'El Salvador' => 'vs_67d09143d81881919811ffe0e936dabd',
+        //     'Brasil' => 'vs_67d093034f3c8191a22bd3436dd75ed0',
+        //     'República Dominicana' => 'vs_67d095d76cc8819190c0288b47ee0d6f',
+        // ];
         $vectorStores = [
-            'Bolivia' => 'vs_67d056778cb08191a576ad35aa08e40f',
-            'Argentina' => 'vs_67d05805f67c8191b72413bcc4ed007f',
-            'Chile' => 'vs_67d058836eec8191ae9e68ccbdfb97b9',
-            'Colombia' => 'vs_67d075c66ea88191bdefe97058130ffc',
-            'Costa Rica' => 'vs_67d077079f388191a5c1b50154ac0b8b',
-            'Ecuador' => 'vs_67d078d06b5c81919076005ba58cc6b6',
-            'Guatemala' => 'vs_67d07d4e6b008191965bcd5b67f17223',
-            'Honduras' => 'vs_67d07f90406c8191826a9d2b09ed2e73',
-            'México' => 'vs_67d082c70f3c8191a1cd533b271331ed',
-            'Nicaragua' => 'vs_67d084b3b2b08191a771895ffee3ed04',
-            'Panamá' => 'vs_67d087007d7c81918476b7a20116bae4',
-            'Paraguay' => 'vs_67d088e01b6c8191bf51e013a9994464',
-            'Perú' => 'vs_67d08bf93ac88191b92a65da3128f9bf',
-            'Puerto Rico' => 'vs_67d08def19a4819191d8eb6e66a5dfe3',
-            'Uruguay' => 'vs_67d08f82493081919f0f18ec30e0aed7',
-            'El Salvador' => 'vs_67d09143d81881919811ffe0e936dabd',
-            'Brasil' => 'vs_67d093034f3c8191a22bd3436dd75ed0',
-            'República Dominicana' => 'vs_67d095d76cc8819190c0288b47ee0d6f',
+            'Bolivia'              => 'vs_69cc6a6eb9b881919141a8672316f1d2',
+            'Argentina'            => 'vs_69cc6a7e1de48191976a0bcd57a1974a',
+            'Chile'                => 'vs_69cc6a8d0f8c8191b0c75bf72110cb47',
+            'Colombia'             => 'vs_69cc6a9b1c6c8191a7eaa699e7bf908a',
+            'Costa Rica'           => 'vs_69cc6aa960b081918b4400b470bd9cb9',
+            'Ecuador'              => 'vs_69cc6ab7f8c08191825ff1f6b2883292',
+            'Guatemala'            => 'vs_69cc6ac611688191b38a5f0dae1626e0',
+            'Honduras'             => 'vs_69cc6ad428548191a6f26032c3827f83',
+            'México'               => 'vs_69cc6ae247488191b052c2f19428e4f5',
+            'Nicaragua'            => 'vs_69cc6af039ec81918e5b050f7582146e',
+            'Panamá'               => 'vs_69cc6afdf4ac819191dbc172c3b6ceaa',
+            'Paraguay'             => 'vs_69cc6b0c43788191be1039816a0dee51',
+            'Perú'                 => 'vs_69cc6b1a4fe081918e4d733bfd766ad3',
+            'Puerto Rico'          => 'vs_69cc6b28582881918e9779a0656ddd4a',
+            'Uruguay'              => 'vs_69cc6b394644819180ab1191dce50378',
+            'El Salvador'          => 'vs_69cc6b67c8c081919c908dc94af10c5e',
+            'Brasil'               => 'vs_69cc6b75b9cc819181c06dc59de31ac2',
+            'República Dominicana' => 'vs_69cc6b83d224819188071e7d36edeac2',
         ];
 
         // Buscar el vector store para el país
@@ -2608,7 +3209,7 @@ public function generarEstrategia($Tipodecampaña, $objective, $genesiscompleto,
             return ['success' => false, 'error' => "No se encontró vector_store para el país: $country"];
         }
 
-        // Opciones para la API
+        // Opciones para la API (el modelo se define en el ChatPrompt del dashboard de OpenAI)
         $options = [
             'prompt' => [
                 'id' => 'pmpt_68c3468147e48193ab09564bc856756905b09529b9ba957c',
@@ -2767,13 +3368,13 @@ EOT;
 
     return OpenAiService::CompletionsAssistants($prompt, $assistant_id);
 }
-public function generarIdeasContenido($Tipodecampaña, $objective, $genesiscompleto, $brief, $creatividad, $estrategia, $modelo = 'gpt-5')
+public function generarIdeasContenido($Tipodecampaña, $objective, $genesiscompleto, $brief, $creatividad, $estrategia)
 {
     try {
         ini_set('max_execution_time', 600);
         Log::info('Iniciando contenido ideas con');
+        // Opciones para el chat-prompt (el modelo se define en el ChatPrompt del dashboard de OpenAI)
         $options = [
-            
             'prompt' => [
                 'id' => 'pmpt_68cad29e51848196846bfe853574f0590b7a0c62264f6ee6',
                
@@ -2789,7 +3390,7 @@ public function generarIdeasContenido($Tipodecampaña, $objective, $genesiscompl
             'tools' => [
                 [
                     'type' => 'file_search',
-                    'vector_store_ids' => ['vs_WIikAxBR2wfrELhu6On7ALVt']
+                    'vector_store_ids' => ['vs_69cb42cda0b08191b54417701027fcd6']
                 ]
             ],
             'background' => true,
@@ -3034,6 +3635,18 @@ public function download(Request $request)
 
 public function GenerarInsight($brief, $objective, $accountId = null, $generatedId = null){
     try {
+        // Validar límite de créditos antes de generar
+        if ($accountId) {
+            $this->validateCreditLimit($accountId);
+        }
+        
+        Log::info('🔍 [GenerarInsight] Iniciando método', [
+            'accountId' => $accountId,
+            'generatedId' => $generatedId,
+            'brief_length' => strlen($brief),
+            'objective_length' => strlen($objective)
+        ]);
+        
         $prompt = <<<EOT
 En base a la siguiente información del brief y objetivo de campaña, encuentras poderosos insights culturales del país asignado en el brief, también si encuentras competidores o campañas similares que se asemejen al objetivo, mencionalos para tomar en cuenta
 BRIEF: 
@@ -3043,10 +3656,50 @@ $objective
 
 EOT;
 
-        $model = "sonar-reasoning-pro";
+        $model = self::MODEL_INSIGHT;
         $temperature = 0.7;
     
         $response = PerplexityService::ChatCompletions($prompt, $model, $temperature);
+
+        // Log detallado de la respuesta
+        Log::info('Respuesta completa Perplexity (GenerarInsight)', [
+            'has_data' => isset($response['data']),
+            'has_error' => isset($response['error']),
+            'has_usage' => isset($response['usage']),
+            'accountId' => $accountId,
+            'generatedId' => $generatedId,
+            'response_keys' => array_keys($response),
+            'usage_structure' => isset($response['usage']) ? $response['usage'] : 'no existe'
+        ]);
+        
+        // Log de tokens Perplexity
+        if(isset($response['usage'])) {
+            Log::info('Usage tokens Perplexity (GenerarInsight)', [
+                'usage' => $response['usage']
+            ]);
+        }
+        
+        // Log de citations Perplexity
+        if(isset($response['citations']) && !empty($response['citations'])) {
+            Log::info('Citations Perplexity (GenerarInsight)', [
+                'citations_count' => count($response['citations']),
+                'citations' => $response['citations']
+            ]);
+        }
+        
+        // Registrar uso de tokens si está disponible y el proceso fue exitoso
+        // IMPORTANTE: Registrar ANTES de verificar errores, para capturar el uso incluso si hay error
+        if (isset($response['data']) && !isset($response['error']) && $accountId && isset($response['usage'])) {
+            Log::info('✅ Condiciones cumplidas, registrando uso (GenerarInsight)');
+            $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'perplexity', 'GenerarInsight', $generatedId);
+        } else {
+            Log::warning('⚠️ No se registró el uso (GenerarInsight)', [
+                'has_data' => isset($response['data']),
+                'has_error' => isset($response['error']),
+                'accountId' => $accountId,
+                'has_usage' => isset($response['usage'])
+            ]);
+        }
 
         // Verificar si hay error ANTES de intentar acceder a 'data'
         if (isset($response['error'])) {
@@ -3080,6 +3733,19 @@ EOT;
 
 public function GenerarInsight2($brief, $objective, $genesisgenerado, $accountId = null, $generatedId = null){
     try {
+        // Validar límite de créditos antes de generar
+        if ($accountId) {
+            $this->validateCreditLimit($accountId);
+        }
+        
+        Log::info('🔍 [GenerarInsight2] Iniciando método', [
+            'accountId' => $accountId,
+            'generatedId' => $generatedId,
+            'brief_length' => strlen($brief),
+            'objective_length' => strlen($objective),
+            'genesis_length' => strlen($genesisgenerado)
+        ]);
+        
         $prompt = <<<EOT
 Usando la siguiente información, busca conversaciones reales, temas, insights sociales sobre los temas relacionados para potenciar cualquier concepto creativo. Hazlo con un enfoque social.
 GENESIS:
@@ -3091,10 +3757,50 @@ $objective
 
 EOT;
 
-        $model = "sonar-reasoning-pro";
+        $model = self::MODEL_INSIGHT2;
         $temperature = 0.7;
     
         $response = PerplexityService::ChatCompletions($prompt, $model, $temperature);
+
+        // Log detallado de la respuesta
+        Log::info('Respuesta completa Perplexity (GenerarInsight2)', [
+            'has_data' => isset($response['data']),
+            'has_error' => isset($response['error']),
+            'has_usage' => isset($response['usage']),
+            'accountId' => $accountId,
+            'generatedId' => $generatedId,
+            'response_keys' => array_keys($response),
+            'usage_structure' => isset($response['usage']) ? $response['usage'] : 'no existe'
+        ]);
+        
+        // Log de tokens Perplexity
+        if(isset($response['usage'])) {
+            Log::info('Usage tokens Perplexity (GenerarInsight2)', [
+                'usage' => $response['usage']
+            ]);
+        }
+        
+        // Log de citations Perplexity
+        if(isset($response['citations']) && !empty($response['citations'])) {
+            Log::info('Citations Perplexity (GenerarInsight2)', [
+                'citations_count' => count($response['citations']),
+                'citations' => $response['citations']
+            ]);
+        }
+        
+        // Registrar uso de tokens si está disponible y el proceso fue exitoso
+        // IMPORTANTE: Registrar ANTES de verificar errores, para capturar el uso incluso si hay error
+        if (isset($response['data']) && !isset($response['error']) && $accountId && isset($response['usage'])) {
+            Log::info('✅ Condiciones cumplidas, registrando uso (GenerarInsight2)');
+            $this->trackUsageIfAvailable($accountId, $model, $response['usage'], 'perplexity', 'GenerarInsight2', $generatedId);
+        } else {
+            Log::warning('⚠️ No se registró el uso (GenerarInsight2)', [
+                'has_data' => isset($response['data']),
+                'has_error' => isset($response['error']),
+                'accountId' => $accountId,
+                'has_usage' => isset($response['usage'])
+            ]);
+        }
 
         // Verificar si hay error ANTES de intentar acceder a 'data'
         if (isset($response['error'])) {
