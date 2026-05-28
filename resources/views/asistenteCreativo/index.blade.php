@@ -300,7 +300,7 @@
         });
 
         function recargarBrief(accountID){
-            let url = "{{ route('getGeneratedBriefV2') }}";
+            let url = "{{ route('getGeneratedBrief') }}";
             let formData = new FormData();
             formData.append('accountID', accountID);
             fetch(url, {
@@ -327,7 +327,7 @@
         }
 
         function recargarGenesis(accountID){
-            let url = "{{ route('getGeneratedGenesisV2') }}";
+            let url = "{{ route('getGeneratedGenesis') }}";
             let formData = new FormData();
             formData.append('accountID', accountID);
             fetch(url, {

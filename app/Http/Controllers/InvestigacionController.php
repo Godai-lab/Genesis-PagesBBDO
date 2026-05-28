@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use App\Models\Account;
 use App\Models\Generated;
 use App\Services\PerplexityService;
+use App\Supports\CostCalculationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -14,6 +16,116 @@ use Illuminate\Support\Facades\Validator;
 
 class InvestigacionController extends Controller
 {
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Investigación';
+    /**
+     * Método auxiliar para registrar el uso de tokens
+     * 
+     * @param int $accountId ID de la cuenta
+     * @param string $model Nombre del modelo usado
+     * @param array $usageData Datos de uso del servicio
+     * @param string $serviceType Tipo de servicio: 'openai', 'perplexity'
+     * @param string $context Contexto de la llamada para request_type
+     * @param string|null $externalRequestId ID de la solicitud externa (ej: ID de tarea asíncrona) para evitar duplicados
+     * @param int|null $generatedId ID de la generación (Generated) para agrupar procesos
+     * @return void
+     */
+    private function trackUsageIfAvailable($accountId, $model, $usageData, $serviceType, $context = '', $externalRequestId = null, $generatedId = null)
+    {
+        try {
+            $inputTokens = 0;
+            $outputTokens = 0;
+            $usageMetrics = [];
+            
+            // Extraer tokens según el tipo de servicio
+            if ($serviceType === 'openai' && isset($usageData['input_tokens']) && isset($usageData['output_tokens'])) {
+                $inputTokens = $usageData['input_tokens'];
+                $outputTokens = $usageData['output_tokens'];
+                $usageMetrics = [
+                    'tokens' => [
+                        'input' => $inputTokens,
+                        'output' => $outputTokens
+                    ]
+                ];
+            } elseif ($serviceType === 'openai' && isset($usageData['prompt_tokens']) && isset($usageData['completion_tokens'])) {
+                // Formato alternativo de OpenAI
+                $inputTokens = $usageData['prompt_tokens'];
+                $outputTokens = $usageData['completion_tokens'];
+                $usageMetrics = [
+                    'tokens' => [
+                        'input' => $inputTokens,
+                        'output' => $outputTokens
+                    ]
+                ];
+            } elseif ($serviceType === 'perplexity') {
+                // Para Perplexity, extraer todos los tipos de tokens disponibles
+                $inputTokens = $usageData['prompt_tokens'] ?? 0;
+                $outputTokens = $usageData['completion_tokens'] ?? 0;
+                
+                // Para sonar-deep-research, guardar todos los tipos de tokens
+                // Si el modelo es sonar-deep-research, incluir todos los campos adicionales
+                if ($model === 'sonar-deep-research') {
+                    $usageMetrics = [
+                        'tokens' => [
+                            'input' => $inputTokens,
+                            'output' => $outputTokens,
+                            'citation' => $usageData['citation_tokens'] ?? 0,
+                            'reasoning' => $usageData['reasoning_tokens'] ?? 0,
+                            'search_queries' => $usageData['num_search_queries'] ?? $usageData['search_queries'] ?? 0
+                        ]
+                    ];
+                } else {
+                    // Para otros modelos de Perplexity, solo input/output
+                    $usageMetrics = [
+                        'tokens' => [
+                            'input' => $inputTokens,
+                            'output' => $outputTokens
+                        ]
+                    ];
+                }
+            }
+            
+            // Solo registrar si hay tokens
+            if ($inputTokens > 0 || $outputTokens > 0) {
+                // Agregar sufijo "-Investigacion" para identificar que es de InvestigacionController
+                $requestType = $context ? $context . '-Investigacion' : 'investigacion';
+                
+                CostCalculationService::trackUsage(
+                    $accountId,
+                    auth()->id(),
+                    $model,
+                    $usageMetrics,
+                    Carbon::now(),
+                    $requestType,
+                    $externalRequestId,
+                    $generatedId, // generated_id
+                    $context, // step
+                    $serviceType // service_type
+                );
+                
+                Log::info("✅ Uso registrado exitosamente (Investigación)", [
+                    'context' => $context,
+                    'model' => $model,
+                    'service_type' => $serviceType,
+                    'usage_metrics' => $usageMetrics,
+                    'request_type' => $requestType,
+                    'external_request_id' => $externalRequestId
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::error("❌ Error al registrar uso en InvestigacionController", [
+                'context' => $context,
+                'model' => $model,
+                'service_type' => $serviceType,
+                'external_request_id' => $externalRequestId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            // No lanzamos la excepción para no interrumpir el flujo
+        }
+    }
+
     /**
      * Display a listing of the resource.
      */
@@ -180,13 +292,15 @@ class InvestigacionController extends Controller
         set_time_limit(300);
         ini_set('max_execution_time', 300);
 
-        $accountId = $request->input('account');
+        $accountId = $request->input('account');        
         $country = $request->input('country');
         $brand = $request->input('brand');
         $instruccion = $request->input('instruccion');
         $modelo = $request->input('modelo', 'sonar-deep-research'); // Valor por defecto
 
         try {
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
             $metadata = [
                 'country' => $country,
                 'brand' => $brand,
@@ -234,6 +348,17 @@ class InvestigacionController extends Controller
                 'goto' => null
             ]);
 
+        }catch (\App\Exceptions\CreditLimitExceededException $e) {
+            // Error específico de límite de créditos - mostrar mensaje personalizado
+            Log::warning('Límite de créditos excedido en generarInvestigacion', [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null
+            ]);
+    
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -348,6 +473,8 @@ class InvestigacionController extends Controller
                     ], 500);
                 }
 
+                $externalRequestId = $metadata['id_deep_research'] ?? null;
+
                 if($response['data']['status'] === 'COMPLETED'){
                     $statusgenerated = 'completed';
                     
@@ -362,6 +489,46 @@ class InvestigacionController extends Controller
                             $sources[] = $source['url'];
                         }
                     }
+                    
+                    // Registrar uso de tokens cuando se completa exitosamente (Perplexity Deep Research)
+                    // Nota: Perplexity sonar-deep-research tiene múltiples tipos de tokens (input, output, citation, reasoning, search_queries)
+                    // Usamos external_request_id para evitar duplicados si ya se registró en el POST
+                  
+                    if (isset($response['data']['response']['usage'])) {
+                        Log::info('Usage completo Perplexity Deep Research', [
+                            'usage' => $response['data']['response']['usage'],
+                            'external_request_id' => $externalRequestId
+                        ]);
+                        
+                        $this->trackUsageIfAvailable(
+                            $generated->account_id,
+                            $metadata['modelo'], // sonar-deep-research
+                            $response['data']['response']['usage'],
+                            'perplexity',
+                            'consultarEstadoGeneracion-Investigacion',
+                            $externalRequestId,
+                            $generationId // generated_id
+                        );
+                    }
+                } elseif($response['data']['status'] === 'FAILED') {
+                    // Si falló pero tiene usage, registrar el consumo (consumió antes de fallar)
+                    if (isset($response['data']['response']['usage'])) {
+                        Log::warning('Status FAILED pero tiene usage - registrando consumo', [
+                            'usage' => $response['data']['response']['usage'],
+                            'external_request_id' => $externalRequestId,
+                            'error_message' => $response['data']['error_message'] ?? null
+                        ]);
+                        
+                        $this->trackUsageIfAvailable(
+                            $generated->account_id,
+                            $metadata['modelo'], // sonar-deep-research
+                            $response['data']['response']['usage'],
+                            'perplexity',
+                            'consultarEstadoGeneracion-Investigacion-FAILED',
+                            $externalRequestId,
+                            $generationId // generated_id
+                        );
+                    }
                 }
 
             }elseif($metadata['modelo'] === 'o4-mini-deep-research' || $metadata['modelo'] === 'o3-deep-research'){
@@ -373,6 +540,8 @@ class InvestigacionController extends Controller
                         'error' => $response['error']
                     ], 500);
                 }
+
+                $externalRequestId = $metadata['id_deep_research'] ?? null;
 
                 if($response['data']['status'] === 'completed'){
                     $statusgenerated = 'completed';
@@ -391,6 +560,20 @@ class InvestigacionController extends Controller
                                 }
                             }
                         }
+                    }
+                    
+                    // Registrar uso de tokens cuando se completa exitosamente (OpenAI Deep Research)
+                    // Usamos external_request_id para evitar duplicados
+                    if (isset($response['data']['usage'])) {
+                        $this->trackUsageIfAvailable(
+                            $generated->account_id,
+                            $metadata['modelo'], // o4-mini-deep-research o o3-deep-research
+                            $response['data']['usage'],
+                            'openai',
+                            'consultarEstadoGeneracion-Investigacion',
+                            $externalRequestId,
+                            $generationId // generated_id
+                        );
                     }
                 }
 
@@ -496,7 +679,7 @@ try {
     $temperature = 0.5;
     $response = PerplexityService::ChatCompletionsAsync($prompt, $model, $temperature, $system_prompt);
 
-    Log::info('Respuesta PerplexityService::ChatCompletions', [
+    Log::info('Respuesta PerplexityService::ChatCompletionsAsync', [
         'response' => $response
     ]);
 
@@ -504,21 +687,36 @@ try {
         return ['success' => false, 'error' => $response['error']];
     }
 
-    // if (!isset($response['data'])) {
-    //     Log::error('La respuesta de ChatCompletions no contiene la clave "data"', [
-    //         'response' => $response,
-    //     ]);
-    //     return ['success' => false, 'error' => 'Error al obtener datos de la IA. Por favor, intenta nuevamente.'];
-    // }
+    // Verificar si el POST devuelve status COMPLETED con response.usage
+    // Esto puede pasar si la tarea se completa inmediatamente
+    if (isset($response['data']['status']) && $response['data']['status'] === 'COMPLETED') {
+        if (isset($response['data']['response']['usage'])) {
+            // Obtener el account_id del generated (se pasa como parámetro o se obtiene del contexto)
+            // Por ahora, lo registramos en consultarEstadoGeneracion, pero aquí podríamos hacerlo también
+            Log::info('POST devolvió status COMPLETED con usage, se registrará en consultarEstadoGeneracion', [
+                'id' => $response['data']['id'] ?? null,
+                'usage' => $response['data']['response']['usage']
+            ]);
+        }
+    }
 
-    // Limpiar el contenido dentro de las etiquetas <think>
-    // $investigacionData = preg_replace('/<think>.*?<\/think>/s', '', $response['data']);
-    // $investigacionData = trim($investigacionData);
+    // Verificar si falló pero tiene usage (consumió antes de fallar)
+    if (isset($response['data']['status']) && $response['data']['status'] === 'FAILED') {
+        if (isset($response['data']['response']['usage'])) {
+            // Obtener el account_id - necesitamos pasarlo como parámetro o obtenerlo del contexto
+            // Por ahora, lo registramos en consultarEstadoGeneracion
+            Log::warning('POST devolvió status FAILED pero tiene usage (consumió antes de fallar)', [
+                'id' => $response['data']['id'] ?? null,
+                'usage' => $response['data']['response']['usage'],
+                'error_message' => $response['data']['error_message'] ?? null
+            ]);
+        }
+    }
 
     return ['success' => true, 'data' =>  $response['data']];
 
 } catch (\Exception $e) {
-    Log::error('Error en la llamada a PerplexityService::ChatCompletions', [
+    Log::error('Error en la llamada a PerplexityService::ChatCompletionsAsync', [
         'exception' => $e->getMessage(),
         'prompt' => $prompt
     ]);

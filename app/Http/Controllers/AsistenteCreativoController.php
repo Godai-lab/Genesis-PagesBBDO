@@ -2,10 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use App\Models\Account;
 use App\Models\Field;
 use App\Models\Generated;
 use App\Services\OpenAiService;
+use App\Supports\ContentCategory;
+use App\Supports\CostCalculationService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Exception;
@@ -13,9 +16,16 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
-use App\Supports\ContentCategory;
 class AsistenteCreativoController extends Controller
 {
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Asistente Creativo';
+    
+    // Modelo utilizado (para registro de uso)
+    // Este modelo NO se envía al ChatPrompt, solo se usa para trackUsage
+    private const MODEL_ASISTENTE_CREATIVO = 'gpt-5.1-2025-11-13';
+    
     //
     public function index()
     {
@@ -54,6 +64,10 @@ class AsistenteCreativoController extends Controller
             ini_set('max_execution_time', 300);
     
             $accountId = $request->input('account');
+            
+            // Validar límite de créditos antes de generar
+            $this->validateCreditLimit($accountId);
+            
             $briefID = $request->input('brief');
             $genesisID = $request->input('genesis');
     
@@ -101,7 +115,7 @@ class AsistenteCreativoController extends Controller
                 }
             } else {
                 // Si no hay categorías seleccionadas, usar el vector store por defecto
-                $vectorIds[] = 'vs_WIikAxBR2wfrELhu6On7ALVt';
+                $vectorIds[] = 'vs_69cb42cda0b08191b54417701027fcd6';
             }
             
             Log::info("📂 Vector stores seleccionados", [
@@ -110,6 +124,7 @@ class AsistenteCreativoController extends Controller
                 'is_default' => empty($selectedCategories)
             ]);
     
+            // Configuración del chat-prompt (el modelo se define en el ChatPrompt del dashboard de OpenAI)
             $options = [
                 'prompt' => [
                     'id' => 'pmpt_68dafbf1014c8195a6f3afca452f954103267248dc0692ae',
@@ -140,6 +155,61 @@ class AsistenteCreativoController extends Controller
             if (isset($response['error'])) {
                 throw new \Exception($response['error']);
             }
+            
+            // Log del ID de respuesta (si existe)
+            $responseId = $response['data']['id'] ?? null;
+            if ($responseId) {
+                Log::info('ID de respuesta OpenAI (Asistente Creativo)', [
+                    'account_id' => $accountId,
+                    'response_id' => $responseId
+                ]);
+            }
+            
+            // Log del objeto usage
+            if (isset($response['data']['usage'])) {
+                $usage = $response['data']['usage'];
+                $inputTokens = $usage['input_tokens'] ?? 0;
+                $outputTokens = $usage['output_tokens'] ?? 0;
+                
+                Log::info('Usage tokens OpenAI (Asistente Creativo)', [
+                    'account_id' => $accountId,
+                    'response_id' => $responseId,
+                    'usage' => $usage
+                ]);
+                
+                // Registrar el uso en la base de datos
+                if ($inputTokens > 0 || $outputTokens > 0) {
+                    try {
+                        // Nota: Asistente Creativo crea el Generated después de generar el prompt
+                        // Por lo tanto, no hay generated_id disponible en este punto
+                        // Si se necesita agrupar, se debería crear el Generated antes de la llamada
+                        CostCalculationService::trackUsage(
+                            $accountId,
+                            auth()->id(),
+                            self::MODEL_ASISTENTE_CREATIVO, // Modelo usado
+                            [
+                                'tokens' => [
+                                    'input' => $inputTokens,
+                                    'output' => $outputTokens
+                                ]
+                            ],
+                            null,
+                            'Asistente Creativo', // request_type simplificado
+                            null, // external_request_id
+                            null, // generated_id (no disponible en este punto)
+                            'generarPrompt', // step
+                            'openai' // service_type
+                        );
+                        Log::info('✅ Uso registrado exitosamente en Asistente Creativo');
+                    } catch (\Exception $e) {
+                        Log::error('Error al registrar uso en Asistente Creativo', [
+                            'error' => $e->getMessage(),
+                            'trace' => $e->getTraceAsString()
+                        ]);
+                        // No lanzamos la excepción para no interrumpir el flujo
+                    }
+                }
+            }
     
             // Extraer respuesta final
             $textoFinal = '';
@@ -168,13 +238,24 @@ class AsistenteCreativoController extends Controller
                 'function' => 'asistenteCreativoGenerate'
             ]);
     
-        } catch (\Exception $e) {
-            Log::error("❌ Excepción en generarPrompt", [
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            Log::warning('Límite de créditos excedido en Asistente Creativo', [
                 'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null
+            ]);
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (\Exception $e) {
+            Log::error("❌ Excepción en generarPrompt (Asistente Creativo)", [
+                'message' => $e->getMessage(),
+                'accountId' => $accountId ?? null,
                 'trace' => $e->getTraceAsString()
             ]);
             return response()->json([
-                'error' => $e->getMessage()
+                'success' => false,
+                'error' => 'Ha ocurrido un error al generar el contenido. Por favor, intenta nuevamente.',
             ]);
         }
     }

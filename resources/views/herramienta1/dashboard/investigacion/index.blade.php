@@ -434,7 +434,9 @@
                                         mostrarLoader();
 
                                         formData.append('account', accountID);
-                                        formData.append('id_generated', id_generated);
+                                        if (id_generated !== null && id_generated !== 'null' && !isNaN(id_generated)) {
+                                            formData.append('id_generated', id_generated);
+                                        }
                                         
                                         // Enviar el formulario al servidor
                                         fetch(form.action, {
@@ -459,6 +461,7 @@
                                                             if (data.status === 'processing') {
                                                                 // La investigación está en proceso, iniciar polling
                                                                 console.log('Investigación iniciada con ID:', data.generation_id);
+                                                                id_generated = data.generation_id;
                                                                 Swal.fire({
                                                                     toast: true,
                                                                     position: 'top-end',
@@ -496,13 +499,15 @@
                                                 contenedor.style.display = 'block';
                                                 const mensaje = contenedor.querySelector('.message');
                                                 console.log('Error recibido:', data.error);
-                                                mensaje.innerHTML = '';
-                                                if(typeof data.error === 'object'){
-                                                    Object.values(data.error).forEach(function(error) {
-                                                        mensaje.innerHTML += `<div class="p-4 mb-4 text-sm font-bold text-red-700 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-500 border border-red-500">${error}</div>`;
-                                                    });
-                                                }else{
-                                                    mensaje.innerHTML = `<div class="p-4 mb-4 text-sm font-bold text-red-700 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-500 border border-red-500">${data.error}</div>`;
+                                                if(mensaje){
+                                                    mensaje.innerHTML = '';
+                                                    if(typeof data.error === 'object'){
+                                                        Object.values(data.error).forEach(function(error) {
+                                                            mensaje.innerHTML += `<div class="p-4 mb-4 text-sm font-bold text-red-700 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-500 border border-red-500">${error}</div>`;
+                                                        });
+                                                    }else{
+                                                        mensaje.innerHTML = `<div class="p-4 mb-4 text-sm font-bold text-red-700 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-500 border border-red-500">${data.error}</div>`;
+                                                    }
                                                 }
                                                 ocultarLoader();
                                             }
