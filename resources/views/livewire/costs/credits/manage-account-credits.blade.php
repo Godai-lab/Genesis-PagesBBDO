@@ -5,7 +5,7 @@
             <div class="p-6 text-gray-900 dark:text-gray-100">
                 <h2 class="text-2xl font-semibold mb-2">Gestión de Créditos por Cuenta</h2>
                 <p class="text-sm text-gray-600 dark:text-gray-400">
-                    Configura límites mensuales de créditos para las cuentas. Usa la búsqueda y filtros para encontrar cuentas específicas.
+                    Configura límites mensuales por usuario y recargas de saldo compartido por cuenta. Usa la búsqueda para encontrar cuentas.
                 </p>
             </div>
         </div>
@@ -23,6 +23,6 @@
         </div>
     </div>
 
-    <!-- Modal -->
     <livewire:costs.credits.modals.set-limit-modal />
+    <livewire:costs.credits.modals.recharge-modal />
 </div>

@@ -2,13 +2,17 @@
 
 namespace App\Livewire\Generador\Herramientas;
 
+use App\Http\Traits\ValidatesCreditLimit;
 use Illuminate\Support\Facades\Storage;
 use Livewire\Attributes\Validate;
+use Livewire\Attributes\Reactive;
 use Livewire\Component;
 use Livewire\Attributes\On;
 use Livewire\WithFileUploads;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
 use App\Services\RunWayService;
+use App\Supports\CostCalculationService;
 
 /**
  * Editor de Videos
@@ -19,6 +23,13 @@ use App\Services\RunWayService;
 class VideoEditor extends Component
 {
     use WithFileUploads;
+    use ValidatesCreditLimit;
+    
+    protected string $toolName = 'Editor de Videos';
+
+    /** ✅ Account ID recibido del componente padre - Reactive para sincronizar automáticamente */
+    #[Reactive]
+    public ?int $accountId = null;
 
     /** Video a editar */
     public $videoFile = null;
@@ -32,7 +43,7 @@ class VideoEditor extends Component
 
     /** Configuración de transformación */
     public string $ratio = '1280:720';
-    public int $duration = 5;
+    public int $duration = 4; // Runway siempre genera 4 segundos, no acepta parámetro de duración
 
     /** Estados de procesamiento */
     public bool $isGenerating = false;
@@ -72,9 +83,9 @@ class VideoEditor extends Component
         '640:480' => '4:3 Clásico'
     ];
 
-    /** Duraciones disponibles */
+    /** Duraciones disponibles - NOTA: Runway siempre genera 4 segundos, no acepta parámetro de duración */
     public array $availableDurations = [
-        5 => '5 segundos'
+        4 => '4 segundos'
     ];
 
     /**
@@ -244,10 +255,25 @@ class VideoEditor extends Component
     public function mount()
     {
         // Inicialización del componente
-        Log::info('🎬 VideoEditor component mounted');
+        Log::info('🎬 VideoEditor component mounted', [
+            'accountId' => $this->accountId
+        ]);
         
         // Notificar que el componente está listo
         $this->dispatch('videoEditorReady');
+    }
+
+    /**
+     * ✅ NUEVO: Listener para actualizar cuenta cuando cambia en el padre
+     */
+    #[On('accountChanged')]
+    public function updateAccount(?int $accountId): void
+    {
+        $this->accountId = $accountId;
+        
+        Log::info('🔄 Cuenta actualizada en VideoEditor', [
+            'accountId' => $accountId
+        ]);
     }
 
     /**
@@ -353,8 +379,7 @@ class VideoEditor extends Component
         // Validación personalizada por modelo
         if (!$this->validarPorModelo()) {
             return; // No continuar si hay errores de validación
-        }
-        
+        }        
         // Activar inmediatamente el spinner
         $this->isGenerating = true;
         $this->results = [];
@@ -379,6 +404,25 @@ class VideoEditor extends Component
     public function executeEditing($data): void
     {
         try {
+            // ✅ Validar que haya una cuenta seleccionada
+            if (!$this->accountId) {
+                $errorMessage = 'Debes seleccionar una cuenta antes de editar videos';
+                $this->addError('promptText', $errorMessage);
+                
+                $this->dispatch('addErrorToList', 
+                    message: $errorMessage, 
+                    type: 'validation', 
+                    tool: 'video-editor'
+                );
+                
+                $this->dispatch('generationError');
+                $this->isGenerating = false;
+                return;
+            }
+            
+            // ✅ Validar límite de créditos usando la cuenta del componente
+            $this->validateCreditLimit($this->accountId);
+            
             // Delegar según el modelo
             switch ($data['model']) {
                 case 'gen4_aleph':
@@ -388,8 +432,31 @@ class VideoEditor extends Component
                     throw new \Exception('Modelo no soportado para edición');
             }
 
+        } catch (\App\Exceptions\CreditLimitExceededException $e) {
+            Log::warning('Límite de créditos excedido en Editor de Videos', [
+                'message' => $e->getMessage(),
+                'accountId' => $this->accountId
+            ]);
+            
+            $this->addError('promptText', $e->getMessage());
+            
+            // Enviar error al componente principal
+            $this->dispatch('addErrorToList', 
+                message: $e->getMessage(), 
+                type: 'credit_limit', 
+                tool: 'video-editor'
+            );
+            
+            $this->dispatch('videoEditError');
+            $this->isGenerating = false;
         } catch (\Exception $e) {
-            $errorMessage = 'Error: ' . $e->getMessage();
+            Log::error('Error en Editor de Videos', [
+                'message' => $e->getMessage(),
+                'accountId' => $this->accountId,
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            $errorMessage = 'Ha ocurrido un error al editar el video. Por favor, intenta nuevamente.';
             $this->addError('promptText', $errorMessage);
             
             // Enviar error al componente principal
@@ -458,7 +525,8 @@ class VideoEditor extends Component
                 prompt: $data['prompt'],
                 model: $data['model'],
                 ratio: $data['ratio'],
-                count: 1 // Para compatibilidad
+                count: 1, // Para compatibilidad
+                duration: $data['duration'] // Pasar la duración para el tracking
             );
             
         } catch (\Exception $e) {
@@ -480,12 +548,17 @@ class VideoEditor extends Component
      * Verifica el estado de edición de video
      */
     #[On('verificarEstadoVideoEditor')]
-    public function verificarEstadoVideoEditor($generationId, $prompt, $model, $ratio, $count): void
+    public function verificarEstadoVideoEditor($generationId, $prompt, $model, $ratio, $count, $duration = null): void
     {
         try {
+            // Usar la duración pasada como parámetro, o la del componente, o 4 por defecto (Runway siempre genera 4 segundos)
+            $finalDuration = $duration ?? $this->duration ?? 4;
+            
             Log::info('🔍 Verificando estado de edición de video', [
                 'generationId' => $generationId,
-                'model' => $model
+                'model' => $model,
+                'duration' => $finalDuration,
+                'durationSource' => $duration ? 'parameter' : ($this->duration ? 'component' : 'default')
             ]);
             
             $datos = [
@@ -493,7 +566,8 @@ class VideoEditor extends Component
                 'prompt' => $prompt,
                 'model' => $model,
                 'ratio' => $ratio,
-                'count' => $count // Para compatibilidad con VideoGenerator
+                'count' => $count, // Para compatibilidad con VideoGenerator
+                'duration' => $finalDuration // Duración del video editado para calcular costo
             ];
             
             // Delegar según el modelo
@@ -557,7 +631,8 @@ class VideoEditor extends Component
                 prompt: $datos['prompt'],
                 model: $datos['model'],
                 ratio: $datos['ratio'],
-                count: $datos['count']
+                count: $datos['count'],
+                duration: $datos['duration'] // Pasar la duración para el tracking
             );
         } else {
             // Error o estado desconocido
@@ -679,10 +754,25 @@ class VideoEditor extends Component
             if (!empty($videos)) {
                 $videoCount = count($videos);
                 
+                // Registrar el uso del video editado (gen4_aleph cobra por segundo)
+                // Runway siempre genera 4 segundos, no acepta parámetro de duración
+                $durationSeconds = $datos['duration'] ?? 4; // Por defecto 4 segundos
+                // Si hay múltiples videos, cada uno tiene la misma duración
+                $totalSeconds = $videoCount * $durationSeconds;
+                
+                $this->trackVideoEditUsage(
+                    'gen4_aleph',
+                    $totalSeconds, // Total de segundos de todos los videos editados
+                    'runway',
+                    $datos['generationId'] // external_request_id para evitar duplicados
+                );
+                
                 Log::info("🎬 Preparando para agregar {$videoCount} video(s) editado(s) al historial", [
                     'videos' => $videos,
                     'prompt' => $datos['prompt'],
-                    'model' => $datos['model']
+                    'model' => $datos['model'],
+                    'durationSeconds' => $durationSeconds,
+                    'totalSeconds' => $totalSeconds
                 ]);
                 
                 // Disparar evento de finalización
@@ -722,6 +812,67 @@ class VideoEditor extends Component
     }
 
 
+
+    /**
+     * Registra el uso de un modelo que cobra por segundo (edición de video)
+     * 
+     * @param string $modelName Nombre del modelo (ej: 'gen4_aleph')
+     * @param float $seconds Duración del video editado en segundos
+     * @param string|null $serviceType Tipo de servicio (ej: 'runway')
+     * @param string|null $externalRequestId ID externo para evitar duplicados (opcional)
+     */
+    private function trackVideoEditUsage(string $modelName, float $seconds, ?string $serviceType = null, ?string $externalRequestId = null): void
+    {
+        // ✅ Usar accountId del componente
+        $userId = Auth::id();
+        
+        if (!$userId) {
+            Log::warning('⚠️ No se pudo obtener userId para registrar uso de edición de video', [
+                'model' => $modelName,
+                'accountId' => $this->accountId
+            ]);
+            return;
+        }
+
+        if ($seconds <= 0) {
+            Log::warning('⚠️ Duración de video inválida', [
+                'model' => $modelName,
+                'seconds' => $seconds
+            ]);
+            return;
+        }
+
+        try {
+            CostCalculationService::trackUsage(
+                $this->accountId,  // ✅ Usar accountId del componente
+                $userId,
+                $modelName,
+                [
+                    'seconds' => $seconds
+                ],
+                null, // usageDate (usa ahora)
+                'Video Editor', // request_type
+                $externalRequestId, // external_request_id (para evitar duplicados)
+                null, // generated_id (no hay Generated para ediciones simples)
+                null, // step
+                $serviceType // service_type
+            );
+            
+            Log::info('✅ Uso registrado exitosamente para edición de video', [
+                'model' => $modelName,
+                'seconds' => $seconds,
+                'accountId' => $this->accountId,
+                'userId' => $userId
+            ]);
+        } catch (\Exception $e) {
+            Log::error('❌ Error al registrar uso de edición de video', [
+                'model' => $modelName,
+                'seconds' => $seconds,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+        }
+    }
 
     public function render()
     {

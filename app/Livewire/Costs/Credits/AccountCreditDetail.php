@@ -17,26 +17,34 @@ class AccountCreditDetail extends Component
     public $selectedMonth;
     public $selectedYear;
     
-    protected $listeners = ['creditLimitUpdated' => 'loadAccountData'];
+    protected $listeners = [
+        'creditLimitUpdated' => 'loadAccountData',
+        'rechargeUpdated' => 'loadAccountData',
+    ];
     
     public function mount($accountId)
     {
         Gate::authorize('haveaccess', 'costs.account-credits');
 
-        $this->account = Account::with('creditLimit')->findOrFail($accountId);
+        $this->account = Account::with(['creditLimit', 'creditRecharges'])->findOrFail($accountId);
         $this->selectedMonth = now()->month;
         $this->selectedYear = now()->year;
     }
     
     public function loadAccountData()
     {
-        $this->account = Account::with('creditLimit')->findOrFail($this->account->id);
+        $this->account = Account::with(['creditLimit', 'creditRecharges'])->findOrFail($this->account->id);
         $this->resetPage();
     }
     
     public function openLimitModal()
     {
         $this->dispatch('openSetLimitModal', accountId: $this->account->id);
+    }
+
+    public function openRechargeModal()
+    {
+        $this->dispatch('openRechargeModal', accountId: $this->account->id);
     }
     
     public function updatedSelectedMonth()
@@ -62,10 +70,10 @@ class AccountCreditDetail extends Component
         $usageUsd = $this->account->getMonthlyUsageInUsd($this->selectedYear, $this->selectedMonth);
         $usageCredits = CreditHelper::usdToCredits($usageUsd);
         
-        // Créditos restantes
-        $remainingCredits = $effectiveLimit !== null ? max(0, $effectiveLimit - $usageCredits) : null;
+        $remainingRechargeUsd = $this->account->getRemainingRechargeBalance();
+        $activeRecharges = $this->account->getActiveRechargesForToday();
         
-        // Porcentaje usado
+        // Porcentaje: uso total de cuenta vs cupo mensual por usuario (referencia)
         $percentageUsed = $effectiveLimit ? ($usageCredits / $effectiveLimit) * 100 : 0;
         
         return (object) [
@@ -74,7 +82,8 @@ class AccountCreditDetail extends Component
             'effective_limit' => $effectiveLimit,
             'usage_usd' => $usageUsd,
             'usage_credits' => $usageCredits,
-            'remaining_credits' => $remainingCredits,
+            'remaining_recharge_usd' => $remainingRechargeUsd,
+            'active_recharges_count' => $activeRecharges->count(),
             'percentage_used' => $percentageUsed,
         ];
     }

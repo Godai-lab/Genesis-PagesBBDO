@@ -57,8 +57,7 @@ class UserCreditsUsage extends Component
         $this->selectedAccountName = $account->name;
         $this->monthName = now()->locale('es')->isoFormat('MMMM YYYY');
         
-        // Obtener uso del mes
-        $this->usageUsd = $account->getMonthlyUsageInUsd();
+        $this->usageUsd = $account->getUserMonthlyUsageInUsd(auth()->id());
         $this->usageCredits = CreditHelper::usdToCredits($this->usageUsd);
         
         // Obtener límite efectivo y créditos restantes

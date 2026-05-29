@@ -222,8 +222,8 @@
                         </div>
                     </div>
 
-                    <!-- Duración dropdown -->
-                    <div x-data="{ open: false }" class="relative">
+                    {{-- Duración dropdown - OCULTO: La API de Runway no acepta parámetro de duración, siempre genera 4 segundos --}}
+                    {{-- <div x-data="{ open: false }" class="relative">
                         <button 
                             @click="open = !open"
                             class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 rounded-full px-3 py-1 text-sm shadow-sm text-gray-700"
@@ -253,7 +253,7 @@
                                 @endforeach
                             </div>
                         </div>
-                    </div>
+                    </div> --}}
                 </div>
 
                 <button 

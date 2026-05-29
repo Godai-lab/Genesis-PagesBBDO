@@ -12,7 +12,10 @@ class AccountCreditsTable extends DataTableComponent
 {
     protected $model = Account::class;
     
-    protected $listeners = ['creditLimitUpdated' => '$refresh'];
+    protected $listeners = [
+        'creditLimitUpdated' => '$refresh',
+        'rechargeUpdated' => '$refresh',
+    ];
 
     public function configure(): void
     {
@@ -43,7 +46,7 @@ class AccountCreditsTable extends DataTableComponent
                 })
                 ->html(),
 
-            Column::make('Límite Mensual')
+            Column::make('Límite / usuario')
                 ->label(function($row) {
                     $effectiveLimit = $row->getEffectiveCreditLimit();
                     
@@ -55,7 +58,7 @@ class AccountCreditsTable extends DataTableComponent
                             . '</div>'
                             . '<div class="text-xs text-gray-500 dark:text-gray-400">(' 
                             . CreditHelper::formatUsd($baseLimitUsd) 
-                            . ')</div>';
+                            . ' c/u)</div>';
                     }
                     
                     return '<span class="text-sm text-gray-400">Ilimitado</span>';
@@ -76,21 +79,22 @@ class AccountCreditsTable extends DataTableComponent
                 })
                 ->html(),
 
-            Column::make('Restante')
+            Column::make('Saldo recarga')
                 ->label(function($row) {
-                    $remainingCredits = $row->getRemainingCredits();
+                    $balance = $row->getRemainingRechargeBalance();
                     
-                    if ($remainingCredits === null) {
-                        return '<span class="text-sm text-gray-400">∞</span>';
+                    if ($balance === null) {
+                        return '<span class="text-sm text-gray-400">—</span>';
                     }
                     
-                    return '<span class="text-sm text-gray-900 dark:text-gray-100">' 
-                        . CreditHelper::formatCredits($remainingCredits) 
-                        . '</span>';
+                    return '<div class="text-sm text-gray-900 dark:text-gray-100">' 
+                        . CreditHelper::formatUsd($balance) 
+                        . '</div>'
+                        . '<div class="text-xs text-gray-500 dark:text-gray-400">vigente hoy</div>';
                 })
                 ->html(),
 
-            Column::make('% Usado')
+            Column::make('% cuenta vs cupo')
                 ->label(function($row) {
                     $effectiveLimit = $row->getEffectiveCreditLimit();
                     
@@ -123,7 +127,11 @@ class AccountCreditsTable extends DataTableComponent
                         <div class="flex space-x-2">
                             <button wire:click="$dispatch(\'openSetLimitModal\', { accountId: ' . $row->id . ' })" 
                                 class="text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100 underline text-sm">
-                                Modificar
+                                Límite
+                            </button>
+                            <button wire:click="$dispatch(\'openRechargeModal\', { accountId: ' . $row->id . ' })" 
+                                class="text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100 underline text-sm">
+                                Recargas
                             </button>
                             <a href="' . route('costs.credits.detail', $row->id) . '" 
                                 class="text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100 underline text-sm">
@@ -140,7 +148,7 @@ class AccountCreditsTable extends DataTableComponent
     public function builder(): Builder
     {
         return Account::query()
-            ->with('creditLimit')
+            ->with(['creditLimit', 'creditRecharges'])
             ->select('accounts.*');
     }
 }

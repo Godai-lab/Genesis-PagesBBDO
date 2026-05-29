@@ -27,6 +27,7 @@
                     </x-nav-link>
                 </div>
                 @endcan
+                {{-- ServiciosPlanes: ya no se usa
                 @can('haveaccess','subscription.index')
                 <div class="hidden space-x-8 sm:-my-px sm:ml-10 sm:flex">
                     <x-nav-link :href="route('planServiceLimits.index')" :active="request()->routeIs('planServiceLimits.index','planServiceLimits.create','planServiceLimits.edit')">
@@ -34,6 +35,7 @@
                     </x-nav-link>
                 </div>
                 @endcan
+                --}}
                 @can('haveaccess','subscription.index')
                 <div class="hidden space-x-8 sm:-my-px sm:ml-10 sm:flex">
                     <x-nav-link :href="route('plans.index')" :active="request()->routeIs('plans.index','plans.create','plans.edit')">

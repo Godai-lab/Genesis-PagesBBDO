@@ -157,7 +157,7 @@
             <div class="flex bg-gray-100 rounded-full p-1 w-fit shadow-sm">
                 {{-- 1. PROMPT GENERATOR (Primero) --}}
                 @if(isset($tools['prompt-generator']))
-                  
+                    @can('haveaccess','generador.prompt')
                     <button 
                         wire:click="setActiveTool('prompt-generator')"
                         type="button"
@@ -168,7 +168,7 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ $tools['prompt-generator']['icon'] }}" />
                         </svg>
                     </button>
-                
+                    @endcan
                 @endif
 
                 {{-- 2. IMAGE GENERATOR --}}
@@ -420,7 +420,7 @@
                                                 </button>
                                                 @endcan
                                                 
-                                                @can('haveaccess','generate.video')
+                                                @can('haveaccess','generador.video')
                                                 <button 
                                                     @click.stop="generateVideoFromHistory('{{ $image['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '1:1' }}')"
                                                     class="bg-blue-600/80 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"
@@ -433,7 +433,7 @@
                                                 </button>
                                                 @endcan
                                             @else
-                                                @can('haveaccess','edit.video')
+                                                @can('haveaccess','generador.video')
                                                 <button 
                                                     @click.stop="editVideoFromHistory('{{ $image['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '16:9' }}')"
                                                     class="bg-purple-600/80 hover:bg-purple-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"
@@ -567,7 +567,7 @@
                                     </button>
                                     @endcan
                                     
-                                    @can('haveaccess','generate.video')
+                                    @can('haveaccess','generador.video')
                                     <button 
                                         @click.stop="generateVideoFromHistory('{{ $item['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '1:1' }}')"
                                         class="bg-blue-600/80 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"
@@ -580,7 +580,7 @@
                                     </button>
                                     @endcan
                                 @else
-                                    @can('haveaccess','edit.video')
+                                    @can('haveaccess','generador.video')
                                     <button 
                                         @click.stop="editVideoFromHistory('{{ $item['url'] }}', '{{ $item['generationId'] ?? 'unknown' }}', '{{ $item['model'] ?? '' }}', '{{ $item['ratio'] ?? '16:9' }}')"
                                         class="bg-purple-600/80 hover:bg-purple-700 text-white px-2 py-1 rounded text-xs backdrop-blur-sm flex items-center gap-1"

@@ -5,7 +5,7 @@
             <div class="p-6 text-gray-900 dark:text-gray-100">
                 <h2 class="text-2xl font-semibold mb-2">Mis Créditos - {{ $monthName }}</h2>
                 <p class="text-sm text-gray-600 dark:text-gray-400">
-                    Monitorea tu uso de créditos y límites mensuales.
+                    Monitorea tu uso personal de créditos y tu límite mensual en cada cuenta.
                 </p>
             </div>
         </div>

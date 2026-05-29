@@ -14,12 +14,15 @@
                         <div>
                             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ $account->name }}</h2>
                             <p class="text-sm text-gray-600 dark:text-gray-400">
-                                Detalle de uso de créditos por mes
+                                Uso total de la cuenta por mes. El límite mensual aplica a cada usuario por separado.
                             </p>
                         </div>
-                        <div>
+                        <div class="flex gap-2">
+                            <button wire:click="openRechargeModal" class="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-200 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 text-sm">
+                                Recargas
+                            </button>
                             <button wire:click="openLimitModal" class="px-4 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-900 dark:bg-gray-700 dark:hover:bg-gray-600 text-sm">
-                                Configurar Límite
+                                Configurar límite
                             </button>
                         </div>
                     </div>
@@ -60,16 +63,15 @@
 
         <!-- Estadísticas del Mes -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-            <!-- Límite Mensual -->
             <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6">
-                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Límite Mensual</h3>
+                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Límite mensual (cada usuario)</h3>
                     @if($stats->effective_limit)
                         <p class="text-2xl font-bold text-gray-900 dark:text-gray-100">
                             {{ \App\Supports\CreditHelper::formatCredits($stats->effective_limit) }}
                         </p>
                         <p class="text-xs text-gray-500 dark:text-gray-400">
-                            {{ \App\Supports\CreditHelper::formatUsd($stats->base_limit_usd) }}
+                            {{ \App\Supports\CreditHelper::formatUsd($stats->base_limit_usd) }} por usuario / mes
                         </p>
                     @else
                         <p class="text-2xl font-bold text-gray-400">Ilimitado</p>
@@ -77,38 +79,40 @@
                 </div>
             </div>
 
-            <!-- Usado -->
             <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6">
-                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Usado</h3>
+                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Usado (cuenta)</h3>
                     <p class="text-2xl font-bold text-gray-900 dark:text-gray-100">
                         {{ \App\Supports\CreditHelper::formatCredits($stats->usage_credits) }}
                     </p>
                     <p class="text-xs text-gray-500 dark:text-gray-400">
                         {{ \App\Supports\CreditHelper::formatUsd($stats->usage_usd) }}
+                        @if($stats->effective_limit)
+                            · {{ number_format($stats->percentage_used, 1) }}% de un cupo individual
+                        @endif
                     </p>
                 </div>
             </div>
 
-            <!-- Restante -->
             <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6">
-                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Restante</h3>
-                    @if($stats->remaining_credits !== null)
+                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Saldo recarga vigente</h3>
+                    @if($stats->remaining_recharge_usd !== null)
                         <p class="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                            {{ \App\Supports\CreditHelper::formatCredits($stats->remaining_credits) }}
+                            {{ \App\Supports\CreditHelper::formatUsd($stats->remaining_recharge_usd) }}
                         </p>
                         <p class="text-xs text-gray-500 dark:text-gray-400">
-                            {{ number_format($stats->percentage_used, 1) }}% usado
+                            {{ $stats->active_recharges_count }} recarga(s) activa(s) hoy
                         </p>
                     @else
-                        <p class="text-2xl font-bold text-gray-400">∞</p>
+                        <p class="text-2xl font-bold text-gray-400">—</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">Sin recarga vigente</p>
                     @endif
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Modal -->
     <livewire:costs.credits.modals.set-limit-modal />
+    <livewire:costs.credits.modals.recharge-modal />
 </div>

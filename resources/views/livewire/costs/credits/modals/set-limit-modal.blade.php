@@ -20,7 +20,7 @@
                     @if(!$unlimitedCredit)
                         <div class="mb-4">
                             <label for="baseLimitUsd" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                Límite Base Mensual en USD
+                                Límite base mensual en USD (por usuario)
                             </label>
                             <input type="number" step="0.01" id="baseLimitUsd" wire:model.live="baseLimitUsd" 
                                    class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 shadow-sm focus:border-gray-400 focus:ring focus:ring-gray-300 focus:ring-opacity-50"
@@ -34,7 +34,7 @@
                             @endif
                             
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                                1000 créditos = $10 USD
+                                1000 créditos = $10 USD. Cada usuario de esta cuenta puede consumir hasta este monto al mes.
                             </p>
                         </div>
                     @endif
