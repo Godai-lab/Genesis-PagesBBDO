@@ -17,11 +17,16 @@ class ValidarConceptoController extends Controller
     use ValidatesCreditLimit;
     
     protected string $toolName = 'Validar Concepto';
+
+    // Modelo del Chat Prompt en OpenAI (pmpt validar / mejorar concepto) — solo para trackUsage
+    private const MODEL_VALIDAR_CONCEPTO = 'gpt-5.2-2025-12-11';
+    private const MODEL_MEJORAR_CONCEPTO = 'gpt-5.2-2025-12-11';
+
     /**
      * Método auxiliar para registrar el uso de tokens de OpenAI
      * 
      * @param int $accountId ID de la cuenta
-     * @param string $model Nombre del modelo usado (ej: 'gpt-5')
+     * @param string $model Nombre del modelo usado (ej: 'gpt-5.2-2025-12-11')
      * @param array $usageData Datos de uso del servicio OpenAI
      * @param string $context Contexto de la llamada para request_type (ej: 'getValidarConceptoForm', 'get_concepto')
      * @return void
@@ -555,7 +560,7 @@ class ValidarConceptoController extends Controller
                     
                     $this->trackUsageIfAvailable(
                         $generated->account_id,
-                        'gpt-5', // Modelo usado por OpenAI (puede variar según configuración)
+                        self::MODEL_VALIDAR_CONCEPTO,
                         $response['data']['usage'],
                         'get_concepto'
                     );
