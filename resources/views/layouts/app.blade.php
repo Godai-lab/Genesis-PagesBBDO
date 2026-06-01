@@ -26,9 +26,8 @@
         <!-- Scripts -->
         {{-- <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script> --}}
         <script src="https://code.jquery.com/jquery-3.7.1.js" integrity="sha256-eKhayi8LEQwp4NKxN+CfCh+3qOVUtJn3QNZ0TciWLP4=" crossorigin="anonymous"></script>
+        <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js" defer></script>
         <script src="{{ asset('js/validate_charly.js') }}"></script>
-        
-
         @vite(['resources/css/app.css', 'resources/js/app.js'])
         
         <link rel="stylesheet" href="{{ asset('css/style.css') }}">

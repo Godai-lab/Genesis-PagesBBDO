@@ -10,6 +10,7 @@ use Livewire\Component;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 
 class SlideCreatorAgent extends Component
@@ -89,6 +90,8 @@ class SlideCreatorAgent extends Component
      */
     public function mount()
     {
+        Gate::authorize('haveaccess', 'asistentepresentaciones.index');
+
         $this->initializeAccountSelection();
         $this->loadGenesisDocuments();
         $this->loadConversations();

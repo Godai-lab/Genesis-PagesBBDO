@@ -3,105 +3,100 @@
 namespace App\AiAgents;
 
 use LarAgent\Agent;
-use LarAgent\Attributes\Tool;
 use App\AiAgents\Tools\Clima;
 use App\AiAgents\Tools\DocumentContext;
 use App\AiAgents\Tools\ReadExternalFile;
-use App\AiAgents\Tools\ImageGenerator;
-use App\AiAgents\History\DatabaseChatHistory;
 
 class ChatOpenaiAgent extends Agent
 {
-    protected $model = 'gpt-5-nano-2025-08-07';
-    protected $history = DatabaseChatHistory::class;
+   
+    /**
+     * Modelo de OpenAI a usar
+     */
+    protected $model = 'gpt-4o-2024-11-20';
+
+    /**
+     * Historial en base de datos (tabla laragent_messages).
+     * @see https://docs.laragent.ai/v1/context/history
+     */
+    protected $history = 'database';
+
+    /**
+     * Provider configurado en laragent.php
+     */
     protected $provider = 'default';
-    protected $contextWindowSize = 4000;
-    protected $reinjectInstructionsPer = 0;
-    protected $storeMeta = true; 
+
+    /**
+     * Temperatura para las respuestas (0-2)
+     * Menor = más predecible, Mayor = más creativo
+     */
+    protected $temperature = 0.6;
+
+    /**
+     * Máximo de tokens en la respuesta
+     */
+    protected $maxCompletionTokens = 4000;
+
+    /**
+     * Guardar metadata con los mensajes
+     */
+    protected $storeMeta = true;
+
+    /**
+     * Herramientas disponibles para el agente
+     * 
+     * - Clima: Obtener información del clima
+     * - DocumentContext: Leer documentos Genesis de la base de datos
+     * - ReadExternalFile: Leer archivos externos subidos por el usuario (PDF, Word, Excel, etc.)
+     */
     protected $tools = [
+        Clima::class,
         DocumentContext::class,
         ReadExternalFile::class,
-        ImageGenerator::class,
-    ];
-    
-    /**
-     * ✅ Structured Output: Normalizar respuestas en formato JSON
-     * Esto garantiza que todas las respuestas tengan el mismo formato
-     */
-    protected $responseSchema = [
-        'name' => 'agent_response',
-        'strict' => true,
-        'schema' => [
-            'type' => 'object',
-            'properties' => [
-                'text' => [
-                    'type' => 'string',
-                    'description' => 'Tu respuesta completa al usuario en español',
-                ],
-                'images' => [
-                    'type' => 'array',
-                    'description' => 'URLs de imágenes generadas (solo si usaste la herramienta ImageGenerator)',
-                    'items' => [
-                        'type' => 'string'
-                    ],
-                    'default' => []
-                ],
-            ],
-            'required' => ['text', 'images'],
-            'additionalProperties' => false,
-        ]
     ];
 
+    /**
+     * Instrucciones del sistema para el agente
+     * 
+     * Define la personalidad, comportamiento y cómo usar las herramientas
+     */
     public function instructions()
     {
-        $instructions = "Eres un asistente de chat experto y amigable. Mantén un tono profesional, útil y en español. Solo respondes para cosas productivas de marketing o cualquier tarea que implique marketing o publicidad o cualquier cosa productiva nada de ocio o entretenimiento.
+        $instructions = "Eres un asistente de chat experto y amigable. Mantén un tono profesional, útil y en español. 
 
-IMPORTANTE sobre imágenes generadas:
-- Cuando uses la herramienta ImageGenerator, esta te devolverá las URLs de las imágenes generadas.
-- Debes extraer SOLO las URLs (que comienzan con https://) del resultado de la herramienta.
-- Coloca estas URLs en el campo 'images' del JSON de respuesta.
-- En el campo 'text', describe lo que generaste pero NO incluyas las URLs completas, solo una breve descripción.
-- NO uses formato markdown para las imágenes, ya que se mostrarán automáticamente.";
-        
-        // ✅ Si hay documento seleccionado, agregar contexto en las instrucciones (NO en el mensaje del usuario)
-        if (session()->has('chat_document')) {
-            $documentId = session()->get('chat_document');
-            $instructions .= "\n\nCONTEXTO IMPORTANTE: El usuario ha seleccionado un documento (ID: {$documentId}) desde la interfaz. 
-DEBES hacer lo siguiente AUTOMÁTICAMENTE en tu primera respuesta:
-1. Usa INMEDIATAMENTE la herramienta 'get_document_context' con el parámetro document_id=\"{$documentId}\" (el ID es: {$documentId})
-2. Lee el contenido completo del documento
-3. Responde al usuario confirmando que has leído el documento y pregunta en qué puedes ayudarle
+Solo respondes para cosas productivas de marketing o cualquier tarea que implique marketing o publicidad o cualquier cosa productiva. No proporciones ayuda para ocio o entretenimiento.
 
-Si el usuario menciona 'el documento', 'este documento', 'el brief', 'el génesis', etc., se refiere al documento con ID {$documentId}.";
-        }
+FORMATO DE RESPUESTAS: 
+- Responde SIEMPRE en texto plano, conversacional y natural.
+- NO uses formato JSON en tus respuestas.
+- Sé claro, conciso y útil.
+
+HERRAMIENTAS DISPONIBLES:
+
+1. 'get_document_context' - Para leer DOCUMENTOS GENESIS de la base de datos
+   - Estos son documentos pre-cargados en el sistema
+   - Usa cuando el usuario seleccione un documento Genesis desde el selector
+   
+2. 'read_external_file' - Para leer ARCHIVOS EXTERNOS subidos por el usuario
+   - PDF, Word (.doc, .docx), Excel (.xls, .xlsx), CSV, TXT
+   - El mensaje del usuario incluirá instrucciones específicas si hay un archivo adjunto
+   - SOLO usa esta herramienta si ves instrucciones como: '[El usuario ha subido un archivo: ...]'
+   
+3. 'get_weather' - Para obtener información del clima de una ciudad";
         
         return $instructions;
     }
 
+    /**
+     * Procesar el mensaje del usuario antes de enviarlo al LLM
+     * Aquí puedes agregar contexto adicional o modificar el mensaje
+     * 
+     * @param string $message
+     * @return string
+     */
     public function prompt($message)
     {
-        // ✅ NO modificar el mensaje del usuario, devolverlo tal cual
+        // Devolver el mensaje tal cual (sin modificaciones)
         return $message;
     }
-
-    /**
-     * ✅ Crear instancia de DatabaseChatHistory con configuración correcta
-     */
-    public function createChatHistory($name)
-    {
-        return new DatabaseChatHistory($name, [
-            'user_id' => auth()->id(),
-            'agent_type' => 'openai',
-            'model_name' => $this->model,
-            'context_window' => $this->contextWindowSize,
-            'store_meta' => $this->storeMeta,
-        ]);
-    }
-  
-
-// #[Tool('Obtener el clima en una ubicación dada')]
-// public function weatherTool($location, $unit = 'celsius')
-// {
-//     return 'El clima en '.$location.' es '.'20'.' grados '.$unit;
-// }
 }

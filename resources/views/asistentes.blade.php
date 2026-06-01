@@ -62,7 +62,7 @@
                 {{--Más herramientas --}}
                
                 <div class="p-6 text-black dark:text-gray-100 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 space-x-4 gap-32 justify-stretch items-stretch">
-                    @can('haveaccess','asistentecreativo.index')
+                    @can('haveaccess','asistentepresentaciones.index')
                     <div class="basis-1/3 flex flex-row gap-6">
                         <div class="text-base mt-1.5">
                             4.0

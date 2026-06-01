@@ -40,6 +40,7 @@ class PermissionSeeder extends Seeder
             ['name' => 'Permitir Asistente Creativo',           'slug' => 'asistentecreativo.index',      'description' => 'El usuario puede usar asistente creativo'],
             ['name' => 'Permitir Asistente Social Media',       'slug' => 'asistentesocialmedia.index',   'description' => 'El usuario puede usar asistente social media'],
             ['name' => 'Permitir Asistente Gráfica',            'slug' => 'asistentegrafica.index',       'description' => 'El usuario puede usar asistente gráfica'],
+            ['name' => 'Permitir Asistente Presentaciones',     'slug' => 'asistentepresentaciones.index', 'description' => 'El usuario puede usar el asistente de presentaciones'],
             ['name' => 'Permitir Generar Investigación',        'slug' => 'investigacion.index',          'description' => 'El usuario puede usar la herramienta de investigación'],
 
             // Chat, imagen, video y prompt del generador
