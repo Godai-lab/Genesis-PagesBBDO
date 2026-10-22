@@ -120,11 +120,19 @@
                 <div class="text-center mb-3 text-gray-600 font-medium">{{ $title }}</div>
                 <div class="grid grid-cols-1 gap-2">
                     @foreach($models as $key => $modelInfo)
+                        @php $enMantenimiento = $this->isInMaintenance($key); @endphp
                         <div class="model-item relative" x-data="{ showTooltip: false }">
                             <div class="flex items-center">
-                                <button wire:click="cambiarModelo('{{ $key }}')" @click="open = false" class="flex-1 flex items-center justify-between px-3 py-2 rounded-lg {{ $selected === $key ? 'bg-black text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-800' }}">
+                                <button
+                                    @if(!$enMantenimiento) wire:click="cambiarModelo('{{ $key }}')" @click="open = false" @endif
+                                    @disabled($enMantenimiento)
+                                    class="flex-1 flex items-center justify-between px-3 py-2 rounded-lg {{ $enMantenimiento ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : ($selected === $key ? 'bg-black text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-800') }}"
+                                >
                                     <div class="flex items-center space-x-2">
                                         <span class="font-medium">{{ $this->getModelName($key) }}</span>
+                                        @if($enMantenimiento)
+                                            <span class="shrink-0 whitespace-nowrap text-[9px] leading-none font-semibold px-1.5 py-0.5 rounded-full bg-red-50 text-red-600">Mantenimiento</span>
+                                        @endif
                                     </div>
                                     <div class="flex items-center space-x-1">
                                         @if($selected === $key)

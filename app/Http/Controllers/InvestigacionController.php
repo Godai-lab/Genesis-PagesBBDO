@@ -287,7 +287,6 @@ class InvestigacionController extends Controller
     }
     public function generarInvestigacion(Request $request)
     {
-
         // esperar la respuesta por 300 segundos con max execution time
         set_time_limit(300);
         ini_set('max_execution_time', 300);
@@ -296,7 +295,14 @@ class InvestigacionController extends Controller
         $country = $request->input('country');
         $brand = $request->input('brand');
         $instruccion = $request->input('instruccion');
-        $modelo = $request->input('modelo', 'sonar-deep-research'); // Valor por defecto
+        $modelo = $request->input('modelo', 'gpt-6-luna');
+
+        if ($modelo === 'sonar-deep-research') {
+            return response()->json([
+                'success' => false,
+                'error' => 'Perplexity está en mantenimiento.',
+            ]);
+        }
 
         try {
             // Validar límite de créditos antes de generar
@@ -322,6 +328,20 @@ class InvestigacionController extends Controller
             // Iniciar la generación en background usando un endpoint separado
             // $this->iniciarGeneracionBackground($generated->id);
             $respuesta = $this->ejecutarGeneracion($accountId, $country, $brand, $instruccion, $modelo, $generated->id);
+
+            if (empty($respuesta['success']) || !isset($respuesta['data'])) {
+                $metadata['generacion_investigacion_status'] = 'failed';
+                $metadata['error'] = $respuesta['error'] ?? 'No se pudo iniciar la investigación.';
+                $generated->update([
+                    'status' => 'failed',
+                    'metadata' => json_encode($metadata),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'error' => $metadata['error'],
+                ], 500);
+            }
 
             // $metadata = json_decode($generated->metadata, true);
             $metadata['queued_at'] = now()->toISOString();
@@ -378,6 +398,7 @@ class InvestigacionController extends Controller
                 case 'sonar-deep-research':
                     $respuestaper = $this->callPerplexityAsync($country, $brand, $instruccion, $modelo);
                     break;
+                case 'gpt-6-luna':
                 case 'o4-mini-deep-research':
                 case 'o3-deep-research':
                     $respuestaper = $this->callOpenAIDeepResearchSync($country, $brand, $instruccion, $modelo);
@@ -531,7 +552,7 @@ class InvestigacionController extends Controller
                     }
                 }
 
-            }elseif($metadata['modelo'] === 'o4-mini-deep-research' || $metadata['modelo'] === 'o3-deep-research'){
+            }elseif(in_array($metadata['modelo'] ?? null, ['gpt-6-luna', 'o4-mini-deep-research', 'o3-deep-research'], true)){
                 $response = \App\Services\OpenAiService::getModelResponse($metadata['id_deep_research']);
 
                 if(isset($response['success']) && !$response['success']){
@@ -771,9 +792,16 @@ try {
     /**
      * Función alternativa para investigación profunda sin background
      */
-    public function callOpenAIDeepResearchSync($country, $brand, $instruccion, $modelo = 'o4-mini-deep-research')
+    public function callOpenAIDeepResearchSync($country, $brand, $instruccion, $modelo = 'gpt-6-luna')
     {       
         try {
+            $tools = $modelo === 'gpt-6-luna'
+                ? [['type' => 'web_search']]
+                : [
+                    ['type' => 'web_search_preview'],
+                    ['type' => 'code_interpreter', 'container' => ['type' => 'auto']],
+                ];
+
             // Configurar opciones para deep research síncrono
             $options = [
                 'model' => $modelo,
@@ -788,10 +816,7 @@ try {
                 ],
                 'background' => true, // Ejecutar en background y esperar hasta completar
                 // 'max_tool_calls' => 1,
-                'tools' => [
-                    ['type' => 'web_search_preview'],
-                    ['type' => 'code_interpreter', 'container' => ['type' => 'auto']]
-                ]
+                'tools' => $tools,
             ];
 
             // Llamar al nuevo endpoint de deep research

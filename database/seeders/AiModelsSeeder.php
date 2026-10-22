@@ -115,6 +115,15 @@ class AiModelsSeeder extends Seeder
         // MODELOS O-SERIES (Deep Research)
         // ============================================
         
+        // GPT-6 Luna
+        // Usado en: InvestigacionController
+        $this->createTextModel($provider, [
+            'name' => 'gpt-6-luna',
+            'slug' => 'gpt-6-luna',
+            'input_price' => 0.10,  // USD por 1M tokens
+            'output_price' => 0.50, // USD por 1M tokens
+        ]);
+
         // O4-Mini Deep Research
         // Usado en: InvestigacionController
         $this->createTextModel($provider, [

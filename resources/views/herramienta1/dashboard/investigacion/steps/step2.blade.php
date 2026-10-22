@@ -30,26 +30,18 @@ $paises = [
             'description' => 'Modelo de investigación rápida y eficiente para análisis básicos',
             'bestFor' => 'Investigaciones rápidas, análisis de mercado, resúmenes ejecutivos',
             'speed' => 'Rápido (3-5 min)',
-            'quality' => 'Alta'
+            'quality' => 'Alta',
+            'maintenance' => true,
         ],
-        'o4-mini-deep-research' => [
-            'name' => 'OpenAI o4-mini Deep Research',
-            'price' => 'de 0.50 a 1.00 usd aprox.',
-            'priceUnit' => 'por investigación',
-            'description' => 'Modelo equilibrado entre velocidad y profundidad de análisis',
-            'bestFor' => 'Investigaciones medias, análisis detallados, reportes completos',
+        'gpt-6-luna' => [
+            'name' => 'OpenAI GPT-6 Luna',
+            'price' => '0.10 usd entrada / 0.50 usd salida',
+            'priceUnit' => 'por 1M de tokens',
+            'description' => 'Modelo de OpenAI para generar la investigación con búsqueda web',
+            'bestFor' => 'Investigaciones de marca, análisis de mercado y reportes',
             'speed' => 'Medio (4-7 min)',
-            'quality' => 'Muy alta'
+            'quality' => 'Muy alta',
         ],
-        'o3-deep-research' => [
-            'name' => 'OpenAI o3 Deep Research',
-            'price' => 'de 1.50 a 4.00 usd aprox.',
-            'priceUnit' => 'por investigación',
-            'description' => 'Modelo de investigación profunda para análisis complejos y detallados',
-            'bestFor' => 'Investigaciones complejas, análisis exhaustivos, estudios académicos',
-            'speed' => 'Lento (+5 min)',
-            'quality' => 'Excelente'
-        ]
     ];
 @endphp
 <div id="step-2-form">
@@ -72,7 +64,7 @@ $paises = [
             </x-dynamic-form>
 
             <!-- Campo oculto para el modelo seleccionado -->
-            <input type="hidden" name="modelo" id="modelo" value="{{ old('modelo', 'sonar-deep-research') }}">
+            <input type="hidden" name="modelo" id="modelo" value="{{ old('modelo', 'gpt-6-luna') }}">
 
             <!-- Visualización del modelo seleccionado -->
             <div class="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
@@ -81,8 +73,8 @@ $paises = [
                 </label>
                 <div id="selected-model-display" class="text-sm text-gray-600">
                     @php 
-                        $selectedModelKey = old('modelo', 'sonar-deep-research');
-                        $selectedModel = $availableModels[$selectedModelKey] ?? $availableModels['sonar-deep-research'];
+                        $selectedModelKey = old('modelo', 'gpt-6-luna');
+                        $selectedModel = $availableModels[$selectedModelKey] ?? $availableModels['gpt-6-luna'];
                     @endphp
                     <div class="space-y-2">
                         <div class="flex items-center justify-between">
@@ -125,7 +117,7 @@ $paises = [
     <!-- Componente ModelSelector -->
     <livewire:generador.components.model-selector
         :models="$availableModels"
-        :selected="old('modelo', 'sonar-deep-research')"
+        :selected="old('modelo', 'gpt-6-luna')"
         title="Modelo de Investigación"
         wire:key="model-selector-investigacion" />
 </div>
@@ -139,7 +131,7 @@ document.addEventListener('livewire:init', () => {
         const availableModels = @json($availableModels);
         const selectedModel = availableModels[selectedKey];
         
-        if (selectedModel) {
+        if (selectedModel && !selectedModel.maintenance) {
             // Actualizar el campo del formulario
             document.getElementById('modelo').value = selectedKey;
             
@@ -175,7 +167,7 @@ document.addEventListener('livewire:init', () => {
     // Disparar evento para sincronizar el selector de modelos con el valor por defecto
     // después de que Livewire esté completamente inicializado
     setTimeout(() => {
-        Livewire.dispatch('image-generator-model-selected', { key: 'sonar-deep-research' });
+        Livewire.dispatch('image-generator-model-selected', { key: 'gpt-6-luna' });
     }, 100);
 });
 
@@ -189,13 +181,15 @@ document.addEventListener('DOMContentLoaded', function() {
         const modeloValue = modeloField.value.trim();
         const errorElement = document.getElementById('modelo-error');
         
-        if (!modeloValue || modeloValue === '') {
+        if (!modeloValue || modeloValue === '' || modeloValue === 'sonar-deep-research') {
             if (!errorElement) {
                 // Crear mensaje de error si no existe
                 const errorDiv = document.createElement('div');
                 errorDiv.id = 'modelo-error';
                 errorDiv.className = 'text-sm text-red-600 dark:text-red-400 mt-2 p-2 bg-red-50 border border-red-200 rounded';
-                errorDiv.textContent = '⚠️ Debes seleccionar un modelo de investigación';
+                errorDiv.textContent = modeloValue === 'sonar-deep-research'
+                    ? '⚠️ Perplexity está en mantenimiento. Elige GPT-6 Luna.'
+                    : '⚠️ Debes seleccionar un modelo de investigación';
                 modeloField.parentNode.appendChild(errorDiv);
             } else {
                 errorElement.style.display = 'block';
