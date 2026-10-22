@@ -44,8 +44,19 @@ class ModelSelector extends Component
      * - Si eventName está configurado → emite ese evento
      * - Si eventName NO está configurado → emite 'image-generator-model-selected' (comportamiento anterior)
      */
+    public function isInMaintenance(string $key): bool
+    {
+        $model = $this->models[$key] ?? null;
+
+        return is_array($model) && !empty($model['maintenance']);
+    }
+
     public function cambiarModelo(string $key)
     {
+        if ($this->isInMaintenance($key)) {
+            return;
+        }
+
         $this->selected = $key; 
         
         // ✅ COMPATIBILIDAD TOTAL: Si no se pasa eventName, usar el comportamiento anterior
