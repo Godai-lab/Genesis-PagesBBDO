@@ -337,8 +337,10 @@
                     let modelo = form.querySelector('input[name="modelo"]');
                     if (modelo) {
                         const modeloGuardado = metadata['modelo'] || 'gpt-6-luna';
-                        const modelosNoDisponibles = ['o4-mini-deep-research', 'o3-deep-research', 'sonar-deep-research'];
-                        modelo.value = modelosNoDisponibles.includes(modeloGuardado) ? 'gpt-6-luna' : modeloGuardado;
+                        const modelosNoDisponibles = ['o4-mini-deep-research', 'o3-deep-research'];
+                        modelo.value = modeloGuardado === 'sonar-deep-research'
+                            ? 'perplexity'
+                            : (modelosNoDisponibles.includes(modeloGuardado) ? 'gpt-6-luna' : modeloGuardado);
                     }
                     goToStepFinal = true;
                 }

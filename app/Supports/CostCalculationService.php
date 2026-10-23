@@ -182,6 +182,14 @@ class CostCalculationService
      */
     protected static function calculateCosts(ModelPricing $pricing, array $usageMetrics): ?array
     {
+        if (isset($usageMetrics['provider_cost_usd']) && is_numeric($usageMetrics['provider_cost_usd'])) {
+            return [
+                'input' => 0,
+                'output' => 0,
+                'total' => (float) $usageMetrics['provider_cost_usd'],
+            ];
+        }
+
         $unitDef = $pricing->unit_definition;
 
         switch ($pricing->pricing_type) {
@@ -456,7 +464,20 @@ class CostCalculationService
             // Actualizar registro existente: agregar nuevo proceso y actualizar totales
             $processesDetail = $existingRecord->processes_detail ?? ['processes' => [], 'summary' => []];
             $processes = $processesDetail['processes'] ?? [];
-            
+
+            if ($externalRequestId !== null) {
+                foreach ($processes as $process) {
+                    if (($process['external_request_id'] ?? null) === $externalRequestId) {
+                        Log::info("Proceso ya registrado para external_request_id: {$externalRequestId}", [
+                            'usage_record_id' => $existingRecord->id,
+                            'generated_id' => $generatedId,
+                            'model' => $modelName,
+                        ]);
+                        return $existingRecord;
+                    }
+                }
+            }
+
             // Agregar el nuevo proceso
             $processes[] = $currentProcess;
             

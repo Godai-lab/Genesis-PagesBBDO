@@ -59,13 +59,25 @@ class InvestigacionController extends Controller
                     ]
                 ];
             } elseif ($serviceType === 'perplexity') {
-                // Para Perplexity, extraer todos los tipos de tokens disponibles
-                $inputTokens = $usageData['prompt_tokens'] ?? 0;
-                $outputTokens = $usageData['completion_tokens'] ?? 0;
-                
-                // Para sonar-deep-research, guardar todos los tipos de tokens
-                // Si el modelo es sonar-deep-research, incluir todos los campos adicionales
-                if ($model === 'sonar-deep-research') {
+                $inputTokens = $usageData['prompt_tokens'] ?? $usageData['input_tokens'] ?? 0;
+                $outputTokens = $usageData['completion_tokens'] ?? $usageData['output_tokens'] ?? 0;
+
+                if ($model === 'perplexity') {
+                    $usageMetrics = [
+                        'tokens' => [
+                            'input' => $inputTokens,
+                            'output' => $outputTokens,
+                        ],
+                    ];
+                    if (isset($usageData['cost']['total_cost']) && is_numeric($usageData['cost']['total_cost'])) {
+                        $usageMetrics['provider_cost_usd'] = (float) $usageData['cost']['total_cost'];
+                    } else {
+                        Log::warning('Perplexity Agent sin usage.cost.total_cost', [
+                            'model' => $model,
+                            'context' => $context,
+                        ]);
+                    }
+                } elseif ($model === 'sonar-deep-research') {
                     $usageMetrics = [
                         'tokens' => [
                             'input' => $inputTokens,
@@ -297,13 +309,6 @@ class InvestigacionController extends Controller
         $instruccion = $request->input('instruccion');
         $modelo = $request->input('modelo', 'gpt-6-luna');
 
-        if ($modelo === 'sonar-deep-research') {
-            return response()->json([
-                'success' => false,
-                'error' => 'Perplexity está en mantenimiento.',
-            ]);
-        }
-
         try {
             // Validar límite de créditos antes de generar
             $this->validateCreditLimit($accountId);
@@ -395,6 +400,7 @@ class InvestigacionController extends Controller
         try {
             // Elegir el método según el modelo seleccionado
             switch ($modelo) {
+                case 'perplexity':
                 case 'sonar-deep-research':
                     $respuestaper = $this->callPerplexityAsync($country, $brand, $instruccion, $modelo);
                     break;
@@ -483,9 +489,9 @@ class InvestigacionController extends Controller
             $sources = [];
             $statusgenerated = 'processing';
 
-            if($metadata['modelo'] === 'sonar-deep-research'){
+            if(in_array($metadata['modelo'] ?? null, ['perplexity', 'sonar-deep-research'], true)){
                 
-                $response = \App\Services\PerplexityService::ChatCompletionsAsyncGet($metadata['id_deep_research']);
+                $response = \App\Services\PerplexityService::AgentBackgroundGet($metadata['id_deep_research']);
 
                 if(isset($response['success']) && !$response['success']){
                     return response()->json([
@@ -495,61 +501,94 @@ class InvestigacionController extends Controller
                 }
 
                 $externalRequestId = $metadata['id_deep_research'] ?? null;
+                $agentStatus = $response['data']['status'] ?? '';
 
-                if($response['data']['status'] === 'COMPLETED'){
+                if($agentStatus === 'completed'){
                     $statusgenerated = 'completed';
-                    
-                    if (isset($response['data']['response']['choices'][0]['message']['content'])) {
-                        $contendata = $response['data']['response']['choices'][0]['message']['content'];
-                        // Limpiar el contenido dentro de las etiquetas <think>
-                        $investigacionData = preg_replace('/<think>.*?<\/think>/s', '', $contendata);
-                        $content = trim($investigacionData);
-                    }
-                    if(isset($response['data']['response']['search_results'])){
-                        foreach($response['data']['response']['search_results'] as $source){
-                            $sources[] = $source['url'];
+                    $contendata = $response['data']['output_text'] ?? '';
+
+                    if ($contendata === '' && isset($response['data']['output']) && is_array($response['data']['output'])) {
+                        foreach ($response['data']['output'] as $output_item) {
+                            if (($output_item['type'] ?? '') !== 'message' || empty($output_item['content'])) {
+                                continue;
+                            }
+                            foreach ($output_item['content'] as $part) {
+                                if (($part['type'] ?? '') === 'output_text' && isset($part['text'])) {
+                                    $contendata .= $part['text'];
+                                }
+                            }
                         }
                     }
-                    
-                    // Registrar uso de tokens cuando se completa exitosamente (Perplexity Deep Research)
-                    // Nota: Perplexity sonar-deep-research tiene múltiples tipos de tokens (input, output, citation, reasoning, search_queries)
-                    // Usamos external_request_id para evitar duplicados si ya se registró en el POST
-                  
-                    if (isset($response['data']['response']['usage'])) {
-                        Log::info('Usage completo Perplexity Deep Research', [
-                            'usage' => $response['data']['response']['usage'],
+
+                    $investigacionData = preg_replace('/<think>.*?<\/think>/s', '', $contendata);
+                    $content = trim($investigacionData);
+
+                    if (isset($response['data']['output']) && is_array($response['data']['output'])) {
+                        foreach ($response['data']['output'] as $output_item) {
+                            if (($output_item['type'] ?? '') === 'search_results' && !empty($output_item['results'])) {
+                                foreach ($output_item['results'] as $source) {
+                                    if (!empty($source['url'])) {
+                                        $sources[] = $source['url'];
+                                    }
+                                }
+                            }
+                            if (($output_item['type'] ?? '') === 'message' && !empty($output_item['content'])) {
+                                foreach ($output_item['content'] as $part) {
+                                    if (empty($part['annotations'])) {
+                                        continue;
+                                    }
+                                    foreach ($part['annotations'] as $annotation) {
+                                        if (!empty($annotation['url'])) {
+                                            $sources[] = $annotation['url'];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    $sources = array_values(array_unique($sources));
+
+                    if (isset($response['data']['usage'])) {
+                        Log::info('Usage completo Perplexity Agent', [
+                            'usage' => $response['data']['usage'],
                             'external_request_id' => $externalRequestId
                         ]);
-                        
+
                         $this->trackUsageIfAvailable(
                             $generated->account_id,
-                            $metadata['modelo'], // sonar-deep-research
-                            $response['data']['response']['usage'],
+                            'perplexity',
+                            $response['data']['usage'],
                             'perplexity',
                             'consultarEstadoGeneracion-Investigacion',
                             $externalRequestId,
-                            $generationId // generated_id
+                            $generationId
                         );
                     }
-                } elseif($response['data']['status'] === 'FAILED') {
-                    // Si falló pero tiene usage, registrar el consumo (consumió antes de fallar)
-                    if (isset($response['data']['response']['usage'])) {
-                        Log::warning('Status FAILED pero tiene usage - registrando consumo', [
-                            'usage' => $response['data']['response']['usage'],
-                            'external_request_id' => $externalRequestId,
-                            'error_message' => $response['data']['error_message'] ?? null
-                        ]);
-                        
+                } elseif(in_array($agentStatus, ['failed', 'cancelled', 'incomplete'], true)) {
+                    if (isset($response['data']['usage'])) {
                         $this->trackUsageIfAvailable(
                             $generated->account_id,
-                            $metadata['modelo'], // sonar-deep-research
-                            $response['data']['response']['usage'],
+                            'perplexity',
+                            $response['data']['usage'],
                             'perplexity',
                             'consultarEstadoGeneracion-Investigacion-FAILED',
                             $externalRequestId,
-                            $generationId // generated_id
+                            $generationId
                         );
                     }
+
+                    $errorMessage = $response['data']['error']['message'] ?? 'La investigación de Perplexity no se completó.';
+                    $metadata['generacion_investigacion_status'] = 'failed';
+                    $metadata['error'] = $errorMessage;
+                    $generated->update([
+                        'status' => 'failed',
+                        'metadata' => json_encode($metadata),
+                    ]);
+
+                    return response()->json([
+                        'success' => false,
+                        'error' => $errorMessage,
+                    ], 500);
                 }
 
             }elseif(in_array($metadata['modelo'] ?? null, ['gpt-6-luna', 'o4-mini-deep-research', 'o3-deep-research'], true)){
@@ -588,7 +627,7 @@ class InvestigacionController extends Controller
                     if (isset($response['data']['usage'])) {
                         $this->trackUsageIfAvailable(
                             $generated->account_id,
-                            $metadata['modelo'], // o4-mini-deep-research o o3-deep-research
+                            $metadata['modelo'], // gpt-6-luna, o4-mini-deep-research o o3-deep-research
                             $response['data']['usage'],
                             'openai',
                             'consultarEstadoGeneracion-Investigacion',
@@ -696,48 +735,20 @@ Process:
 EOT;
 
 try {
-    $model = $modelo;
-    $temperature = 0.5;
-    $response = PerplexityService::ChatCompletionsAsync($prompt, $model, $temperature, $system_prompt);
+    $response = PerplexityService::AgentBackground($prompt, $system_prompt, 'medium', 12000, 30);
 
-    Log::info('Respuesta PerplexityService::ChatCompletionsAsync', [
+    Log::info('Respuesta PerplexityService::AgentBackground', [
         'response' => $response
     ]);
 
-    if(isset($response['error'])){
-        return ['success' => false, 'error' => $response['error']];
-    }
-
-    // Verificar si el POST devuelve status COMPLETED con response.usage
-    // Esto puede pasar si la tarea se completa inmediatamente
-    if (isset($response['data']['status']) && $response['data']['status'] === 'COMPLETED') {
-        if (isset($response['data']['response']['usage'])) {
-            // Obtener el account_id del generated (se pasa como parámetro o se obtiene del contexto)
-            // Por ahora, lo registramos en consultarEstadoGeneracion, pero aquí podríamos hacerlo también
-            Log::info('POST devolvió status COMPLETED con usage, se registrará en consultarEstadoGeneracion', [
-                'id' => $response['data']['id'] ?? null,
-                'usage' => $response['data']['response']['usage']
-            ]);
-        }
-    }
-
-    // Verificar si falló pero tiene usage (consumió antes de fallar)
-    if (isset($response['data']['status']) && $response['data']['status'] === 'FAILED') {
-        if (isset($response['data']['response']['usage'])) {
-            // Obtener el account_id - necesitamos pasarlo como parámetro o obtenerlo del contexto
-            // Por ahora, lo registramos en consultarEstadoGeneracion
-            Log::warning('POST devolvió status FAILED pero tiene usage (consumió antes de fallar)', [
-                'id' => $response['data']['id'] ?? null,
-                'usage' => $response['data']['response']['usage'],
-                'error_message' => $response['data']['error_message'] ?? null
-            ]);
-        }
+    if(empty($response['success'])){
+        return ['success' => false, 'error' => $response['error'] ?? 'Error al iniciar la investigación de Perplexity.'];
     }
 
     return ['success' => true, 'data' =>  $response['data']];
 
 } catch (\Exception $e) {
-    Log::error('Error en la llamada a PerplexityService::ChatCompletionsAsync', [
+    Log::error('Error en la llamada a PerplexityService::AgentBackground', [
         'exception' => $e->getMessage(),
         'prompt' => $prompt
     ]);
@@ -796,7 +807,10 @@ try {
     {       
         try {
             $tools = $modelo === 'gpt-6-luna'
-                ? [['type' => 'web_search']]
+                ? [
+                    ['type' => 'web_search'],
+                    ['type' => 'code_interpreter', 'container' => ['type' => 'auto']],
+                ]
                 : [
                     ['type' => 'web_search_preview'],
                     ['type' => 'code_interpreter', 'container' => ['type' => 'auto']],
