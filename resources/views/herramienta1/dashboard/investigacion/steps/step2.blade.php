@@ -23,15 +23,14 @@ $paises = [
 ];
 
     $availableModels = [
-        'sonar-deep-research' => [
+        'perplexity' => [
             'name' => 'Perplexity',
-            'price' => 'de 0.80 a 1.25 usd aprox.',
-            'priceUnit' => 'por investigación',
+            'price' => 'según consumo',
+            'priceUnit' => 'lo cobra Perplexity',
             'description' => 'Modelo de investigación rápida y eficiente para análisis básicos',
             'bestFor' => 'Investigaciones rápidas, análisis de mercado, resúmenes ejecutivos',
             'speed' => 'Rápido (3-5 min)',
             'quality' => 'Alta',
-            'maintenance' => true,
         ],
         'gpt-6-luna' => [
             'name' => 'OpenAI GPT-6 Luna',
@@ -181,15 +180,13 @@ document.addEventListener('DOMContentLoaded', function() {
         const modeloValue = modeloField.value.trim();
         const errorElement = document.getElementById('modelo-error');
         
-        if (!modeloValue || modeloValue === '' || modeloValue === 'sonar-deep-research') {
+        if (!modeloValue || modeloValue === '') {
             if (!errorElement) {
                 // Crear mensaje de error si no existe
                 const errorDiv = document.createElement('div');
                 errorDiv.id = 'modelo-error';
                 errorDiv.className = 'text-sm text-red-600 dark:text-red-400 mt-2 p-2 bg-red-50 border border-red-200 rounded';
-                errorDiv.textContent = modeloValue === 'sonar-deep-research'
-                    ? '⚠️ Perplexity está en mantenimiento. Elige GPT-6 Luna.'
-                    : '⚠️ Debes seleccionar un modelo de investigación';
+                errorDiv.textContent = '⚠️ Debes seleccionar un modelo de investigación';
                 modeloField.parentNode.appendChild(errorDiv);
             } else {
                 errorElement.style.display = 'block';

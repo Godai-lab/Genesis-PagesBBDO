@@ -292,4 +292,113 @@ class PerplexityService
             return ['success' => false, 'error' => $e->getMessage()];
         }
     }
+
+    /**
+     * Inicia una investigación en background con la Agent API.
+     * Responde al momento con id y status queued.
+     */
+    public static function AgentBackground($text, $system_prompt = null, $preset = 'medium', $maxOutputTokens = 12000, $maxSteps = 30)
+    {
+        try {
+            $data = [
+                'preset' => $preset,
+                'background' => true,
+                'input' => $text,
+                'max_output_tokens' => $maxOutputTokens,
+                'max_steps' => $maxSteps,
+            ];
+
+            if (!empty($system_prompt)) {
+                $data['instructions'] = $system_prompt;
+            }
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, 'https://api.perplexity.ai/v1/agent');
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . env('PERPLEXITY_API_KEY'),
+            ]);
+            curl_setopt($ch, CURLOPT_POST, 1);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            $response_data = json_decode($response, true);
+
+            if ($http_code >= 200 && $http_code < 300 && isset($response_data['id'])) {
+                return ['success' => true, 'data' => $response_data];
+            }
+
+            Log::error('Error HTTP en AgentBackground', [
+                'http_code' => $http_code,
+                'response' => $response,
+            ]);
+
+            return ['success' => false, 'error' => self::agentErrorMessage($response_data, $http_code)];
+        } catch (\Exception $e) {
+            Log::error('Excepción en AgentBackground', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Consulta una investigación iniciada con AgentBackground.
+     */
+    public static function AgentBackgroundGet($requestId)
+    {
+        try {
+            $url = 'https://api.perplexity.ai/v1/agent/' . $requestId;
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . env('PERPLEXITY_API_KEY'),
+            ]);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            $response_data = json_decode($response, true);
+
+            if ($http_code >= 200 && $http_code < 300 && is_array($response_data) && isset($response_data['id'])) {
+                return ['success' => true, 'data' => $response_data];
+            }
+
+            Log::error('Error HTTP en AgentBackgroundGet', [
+                'http_code' => $http_code,
+                'response' => $response,
+            ]);
+
+            return ['success' => false, 'error' => self::agentErrorMessage($response_data, $http_code)];
+        } catch (\Exception $e) {
+            Log::error('Excepción en AgentBackgroundGet', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    private static function agentErrorMessage($response_data, $http_code)
+    {
+        if (is_array($response_data) && isset($response_data['error'])) {
+            if (is_string($response_data['error']) && $response_data['error'] !== '') {
+                return $response_data['error'];
+            }
+            if (is_array($response_data['error']) && !empty($response_data['error']['message'])) {
+                return $response_data['error']['message'];
+            }
+        }
+
+        return "Error HTTP: $http_code";
+    }
 }

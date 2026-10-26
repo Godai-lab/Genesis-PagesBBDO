@@ -302,6 +302,14 @@ class AiModelsSeeder extends Seeder
             'markup_percentage' => null,
             'status' => 'active'
         ]);
+
+        // Flujo de investigación por la Agent API. El monto se toma de usage.cost.total_cost.
+        $this->createTextModel($provider, [
+            'name' => 'perplexity',
+            'slug' => 'perplexity',
+            'input_price' => 0,
+            'output_price' => 0,
+        ]);
     }
     
     /**
