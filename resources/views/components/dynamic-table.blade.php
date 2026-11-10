@@ -45,6 +45,8 @@
                             <td class="text-left py-3 pl-6 pr-2 border-b border-black">
                                 @if($td == 'status' || $td == 'full_access')
                                     <x-dynamic-table-switch :id="$row->id" :status="$row[$td]" />
+                                @elseif($row[$td] instanceof \DateTimeInterface)
+                                    {{ \Carbon\Carbon::instance($row[$td])->format('d/m/Y H:i') }}
                                 @elseif(is_object($row[$td]) && $td != 'created_at' && $td != 'updated_at')
                                     @foreach ($row[$td] as $key => $filaobj)
                                         <span class="bg-black text-white px-2 py-1 rounded-md text-xs whitespace-nowrap">{{$filaobj->name}}</span>
@@ -61,7 +63,11 @@
                                         foreach ($arrayrow = explode('.', $td) as $key => $elem) {
                                             $rowaux = $rowaux[$elem];
                                         }
-                                        echo $rowaux;
+                                        if ($rowaux instanceof \DateTimeInterface) {
+                                            echo \Carbon\Carbon::instance($rowaux)->format('d/m/Y H:i');
+                                        } else {
+                                            echo $rowaux;
+                                        }
                                     @endphp
                                 @endif
                             </td>
